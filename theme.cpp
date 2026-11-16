@@ -42,7 +42,7 @@ struct Site {
     BYTE length{3};
 };
 
-enum SiteIndex { rowFill, emptyFill, labelColor, workspaceFill, treeTabFill, treeTabText };
+enum SiteIndex { rowFill, emptyFill, labelColor, workspaceFill, treeTabFill, treeTabText, toolbarEdgeStroke };
 Site sites[] = {
     {nullptr, {0x44, 0x8B, 0xC6}, 0}, // mov r8d, esi
     {nullptr, {0x0F, 0x45, 0xD0}, 0}, // cmovne edx, eax
@@ -50,6 +50,7 @@ Site sites[] = {
     {nullptr, {0x44, 0x8B, 0xC0}, 0}, // mov r8d, eax
     {nullptr, {0x8B, 0xD8}, 0, 2},  // mov ebx, eax
     {nullptr, {0x44, 0x8B, 0xC0}, 0}, // mov r8d, eax
+    {nullptr, {0x8B, 0xD7}, 0, 2},  // mov edx, edi
 };
 #ifdef THEME_BACKGROUND_ONLY
 constexpr size_t installedSiteCount = 2;
@@ -283,6 +284,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     const bool withWindowTabs = (theme & enableWindowTabs) != 0;
     const bool withTreeTabs = (theme & enableTreeTabs) != 0;
     const bool withPopupMenu = (theme & enablePopupMenu) != 0;
+    BYTE length = 3;
     if (event.ExceptionAddress == sites[rowFill].address) {
         // This call site fills the area occupied by the tree's rows.
         const auto original = static_cast<DWORD>(regs.Rsi);
@@ -390,15 +392,23 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
             regs.Rax = toBgr(colors.colors[original == platformActiveTreeTabBgr ? treeTabsActive : treeTabsInactive]);
         }
         regs.Rbx = static_cast<DWORD>(regs.Rax);
+        length = sites[treeTabFill].length;
     } else if (event.ExceptionAddress == sites[treeTabText].address) {
         const auto original = static_cast<DWORD>(regs.Rax);
         regs.R8 = withTreeTabs && original == platformTreeTabTextBgr && isTreeTabStrip(regs.Rdi) ?
             toBgr(colors.colors[treeTabsText]) : original;
+    } else if (event.ExceptionAddress == sites[toolbarEdgeStroke].address) {
+        const auto original = static_cast<DWORD>(regs.Rdi);
+        const bool toolbarEdge = (theme & enableToolbarBorder) != 0 &&
+            original == barBackgroundBgr &&
+            callerAt(regs, 0x38) == graphicsBase + 0xAF1DB &&
+            callerAt(regs, 0xF8) == frameBase + 0x8BD1BF &&
+            callerAt(regs, 0x1B8) == frameBase + 0x8BB658;
+        regs.Rdx = toolbarEdge ? toBgr(colors.colors[toolbarBorder]) : original;
+        length = sites[toolbarEdgeStroke].length;
     } else {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    const BYTE length = event.ExceptionAddress == sites[treeTabFill].address ?
-        sites[treeTabFill].length : 3;
     regs.Rip = reinterpret_cast<ULONG_PTR>(event.ExceptionAddress) + length;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -420,6 +430,7 @@ DWORD installSites()
     sites[workspaceFill].address = reinterpret_cast<BYTE*>(frameBase + 0x9518EC);
     sites[treeTabFill].address = reinterpret_cast<BYTE*>(frameBase + 0x5D4B1E);
     sites[treeTabText].address = reinterpret_cast<BYTE*>(frameBase + 0x5D4104);
+    sites[toolbarEdgeStroke].address = reinterpret_cast<BYTE*>(graphicsBase + 0xAEDA3);
     for (size_t i = 0; i < installedSiteCount; ++i) {
         const auto& site = sites[i];
         if (std::memcmp(site.address, site.instruction.data(), site.length) != 0)
@@ -469,9 +480,11 @@ DWORD installSites()
             }
         }
     }
-    for (size_t i = 0; i < prepared; ++i) {
+    // Sites on the same page can observe a previous site's writable protection.
+    while (prepared != 0) {
+        auto& site = sites[--prepared];
         DWORD ignored{};
-        if (!VirtualProtect(sites[i].address, 1, sites[i].protection, &ignored) && !error)
+        if (!VirtualProtect(site.address, 1, site.protection, &ignored) && !error)
             error = GetLastError();
     }
     // A thread may still be returning from a breakpoint after rollback.

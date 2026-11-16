@@ -28,6 +28,12 @@ SITES = {
 CAIRO_COLORS = {"cairo_set_source_rgb", "cairo_set_source_rgba"}
 # cmp [rdi+60h],4; mov edx,eax; not edx; mov rcx,rdi; cmovne edx,eax; call rel32
 FILL_PREFIX = bytes.fromhex("83 7F 60 04 8B D0 F7 D2 48 8B CF 0F 45 D0 E8")
+FRAME_COLOR_PATTERNS = {
+    "k83MenuTextCOLORREF": "48 8B 05 ?? ?? ?? ?? BB FF FF FF 00 8B 30 74 ??",
+    "k83MenuSelectBackColor": "48 8B 15 ?? ?? ?? ?? 48 8B 00 FF 90 ?? 02 00 00 8B D8",
+    "k83FocusWindowColor": "48 8B 15 ?? ?? ?? ?? 48 8B CB FF 90 40 02 00 00 0F B6 D0",
+    "k83TabsBorderCOLORREF": "48 8B 05 ?? ?? ?? ?? 84 D2 75 ?? 8B 08 EB ??",
+}
 
 
 class Image:
@@ -114,6 +120,28 @@ def fill_candidates(rva, code, rgba_calls):
                    "callee": f"0x{callee:X}", "rgba_call": f"0x{rgba_call:X}"}
 
 
+def frame_color_candidates(image, rva, code):
+    slots = {}
+    for dll, symbol, slot in image.imports():
+        if dll in {"core83.dll", "core85.dll"} and symbol.startswith("?"):
+            slots[symbol[1:].split("@", 1)[0]] = slot
+    result = {}
+    for name, pattern in FRAME_COLOR_PATTERNS.items():
+        slot = slots.get(name)
+        candidates = []
+        if slot is not None:
+            window = b"".join(b"." if byte == "??" else re.escape(bytes.fromhex(byte))
+                              for byte in pattern.split())
+            for match in re.finditer(b"(?=" + window + b")", code, re.S):
+                offset = match.start()
+                displacement = struct.unpack_from("<i", code, offset + 3)[0]
+                if rva + offset + 7 + displacement == slot:
+                    candidates.append(f"0x{rva + offset:X}")
+        result[name] = {"iat": None if slot is None else f"0x{slot:X}",
+                        "load_candidates": candidates}
+    return result
+
+
 def compare(directory, signatures):
     result = {"directory": str(directory), "clients": [], "modules": {}}
     for name in ("1cv8.exe", "1cv8c.exe"):
@@ -128,7 +156,9 @@ def compare(directory, signatures):
             # Lookahead includes overlapping matches, preserving ambiguity.
             matches = re.finditer(b"(?=" + re.escape(signature) + b")", code)
             summary["exact_windows"][site] = [f"0x{rva + match.start() + 8:X}" for match in matches]
-        if name == "grphcs.dll":
+        if name == "frame.dll":
+            summary["frame_color_candidates"] = frame_color_candidates(image, rva, code)
+        elif name == "grphcs.dll":
             imports = {slot: symbol for dll, symbol, slot in image.imports()
                        if dll == "cairo.dll" and symbol in CAIRO_COLORS}
             summary["cairo_imports"] = {symbol: f"0x{slot:X}" for slot, symbol in imports.items()}

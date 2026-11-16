@@ -57,6 +57,11 @@ Site sites[] = {
     {nullptr, {0x8B, 0xD8}, 0, 2},  // mov ebx, eax
     {nullptr, {0x44, 0x8B, 0xC0}, 0}, // mov r8d, eax
 };
+#ifdef THEME_BACKGROUND_ONLY
+constexpr size_t installedSiteCount = 2;
+#else
+constexpr size_t installedSiteCount = std::size(sites);
+#endif
 
 ULONG_PTR frameBase;
 ULONG_PTR graphicsBase;
@@ -358,7 +363,8 @@ DWORD installSites()
     sites[workspaceFill].address = reinterpret_cast<BYTE*>(frameBase + 0x9518EC);
     sites[treeTabFill].address = reinterpret_cast<BYTE*>(frameBase + 0x5D4B1E);
     sites[treeTabText].address = reinterpret_cast<BYTE*>(frameBase + 0x5D4104);
-    for (const auto& site : sites) {
+    for (size_t i = 0; i < installedSiteCount; ++i) {
+        const auto& site = sites[i];
         if (std::memcmp(site.address, site.instruction.data(), site.length) != 0)
             return ERROR_INVALID_DATA;
     }
@@ -379,7 +385,8 @@ DWORD installSites()
     if (!handler) return ERROR_INVALID_FUNCTION;
     size_t prepared = 0;
     DWORD error = ERROR_SUCCESS;
-    for (auto& site : sites) {
+    for (size_t i = 0; i < installedSiteCount; ++i) {
+        auto& site = sites[i];
         if (!VirtualProtect(site.address, 1, PAGE_EXECUTE_READWRITE, &site.protection)) {
             error = GetLastError();
             break;
@@ -387,7 +394,8 @@ DWORD installSites()
         ++prepared;
     }
     if (!error) {
-        for (auto& site : sites) {
+        for (size_t i = 0; i < installedSiteCount; ++i) {
+            auto& site = sites[i];
             InterlockedExchange8(reinterpret_cast<volatile char*>(site.address),
                                  static_cast<char>(0xCC));
             if (!FlushInstructionCache(GetCurrentProcess(), site.address, 1)) {
@@ -396,7 +404,8 @@ DWORD installSites()
             }
         }
         if (error) {
-            for (auto& site : sites) {
+            for (size_t i = 0; i < installedSiteCount; ++i) {
+                auto& site = sites[i];
                 InterlockedExchange8(reinterpret_cast<volatile char*>(site.address),
                                      static_cast<char>(site.instruction.front()));
                 FlushInstructionCache(GetCurrentProcess(), site.address, 1);

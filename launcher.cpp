@@ -5,6 +5,10 @@
 #include <cwchar>
 #include <filesystem>
 #include <string_view>
+#ifdef THEME_BENCHMARK
+#include <chrono>
+#include <psapi.h>
+#endif
 
 static_assert(sizeof(void*) == 8);
 
@@ -86,6 +90,62 @@ bool serverRef(const std::wstring& target)
            target.find_first_of(L"\"\r\n/") == std::wstring::npos;
 }
 
+#ifdef THEME_BENCHMARK
+struct BenchmarkWindow {
+    DWORD pid;
+    HWND window;
+    size_t count;
+};
+
+BOOL CALLBACK findBenchmarkWindow(HWND window, LPARAM param)
+{
+    auto& target = *reinterpret_cast<BenchmarkWindow*>(param);
+    DWORD pid{};
+    GetWindowThreadProcessId(window, &pid);
+    if (pid == target.pid && IsWindowVisible(window) && !IsIconic(window) &&
+        !GetWindow(window, GW_OWNER) && (GetWindowLongPtrW(window, GWL_STYLE) & WS_CAPTION) == WS_CAPTION) {
+        target.window = window;
+        ++target.count;
+    }
+    return TRUE;
+}
+
+ULONGLONG cpuTicks(const FILETIME& time)
+{
+    return (static_cast<ULONGLONG>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+}
+
+bool benchmark(HANDLE child, DWORD pid)
+{
+    BenchmarkWindow target{pid, nullptr, 0};
+    if (!EnumWindows(findBenchmarkWindow, reinterpret_cast<LPARAM>(&target)) || target.count != 1)
+        return false;
+    constexpr UINT flags = RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN;
+    for (int i = 0; i < 10; ++i)
+        if (!RedrawWindow(target.window, nullptr, nullptr, flags)) return false;
+
+    FILETIME created{}, exited{}, kernelBefore{}, userBefore{}, kernelAfter{}, userAfter{};
+    if (!GetProcessTimes(child, &created, &exited, &kernelBefore, &userBefore)) return false;
+    const auto start = std::chrono::steady_clock::now();
+    constexpr int cycles = 300;
+    for (int i = 0; i < cycles; ++i)
+        if (!RedrawWindow(target.window, nullptr, nullptr, flags)) return false;
+    const auto elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+    if (!GetProcessTimes(child, &created, &exited, &kernelAfter, &userAfter)) return false;
+    PROCESS_MEMORY_COUNTERS_EX memory{};
+    memory.cb = sizeof(memory);
+    if (!K32GetProcessMemoryInfo(child, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),
+                                 sizeof(memory))) return false;
+    const auto cpu = cpuTicks(kernelAfter) - cpuTicks(kernelBefore) +
+                     cpuTicks(userAfter) - cpuTicks(userBefore);
+    std::printf("Benchmark pid=%lu cycles=%d cpu_ms=%.2f elapsed_ms=%.2f private_bytes=%zu\n",
+                pid, cycles, cpu / 10000.0, elapsed, memory.PrivateUsage);
+    std::fflush(stdout);
+    return true;
+}
+#endif
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv)
@@ -137,12 +197,22 @@ int wmain(int argc, wchar_t** argv)
     CloseHandle(process.hThread);
     std::printf("Started Configurator PID %lu. Open the target tree first.\n", process.dwProcessId);
     std::puts("Enter e to enable, d to disable, q to close this launcher.");
+#ifdef THEME_BENCHMARK
+    std::puts("Enter b to measure 300 synchronous redraws of the target window.");
+#endif
     std::fflush(stdout);
 
     ULONG_PTR setter{};
     for (char input[32]; std::fgets(input, sizeof(input), stdin); ) {
         const char action = input[0];
         if (action == 'q') break;
+#ifdef THEME_BENCHMARK
+        if (action == 'b') {
+            if (!benchmark(child, process.dwProcessId))
+                std::fputs("Benchmark failed. Use one visible Configurator window.\n", stderr);
+            continue;
+        }
+#endif
         if (action != 'e' && action != 'd') continue;
         if (WaitForSingleObject(child, 0) != WAIT_TIMEOUT) {
             std::fputs("Configurator has exited.\n", stderr);

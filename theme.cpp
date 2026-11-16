@@ -23,6 +23,12 @@ constexpr DWORD statusMutedTextRgb = 0x00A7B5C7;
 constexpr DWORD propertyMutedTextRgb = 0x00A7B5C7;
 constexpr DWORD propertyGroupTextRgb = 0x00B9D4FF;
 constexpr DWORD propertySelectionBgr = 0x008A5A30;
+constexpr DWORD activeWindowTabBgr = 0x008A5A30;
+constexpr DWORD inactiveWindowTabBgr = 0x004A372A;
+constexpr DWORD platformActiveWindowTabBgr = 0x00E6CCB2;
+constexpr DWORD platformInactiveWindowTabBgr = 0x00B2B2B2;
+constexpr ULONG_PTR windowTabPaintReturn = 0x8EFC3A;
+constexpr ULONG_PTR windowPanelPaintReturn = 0x8EF5DD;
 constexpr ULONG_PTR propertyPaintReturn = 0x4F60ED;
 constexpr ULONG_PTR sharedListPaintReturn = 0x8117F5;
 constexpr ULONG_PTR dropdownPaintVtable = 0xA8A278;
@@ -212,6 +218,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     const bool withBars = (theme & enableTreeAndBars) != 0;
     const bool withProperties = (theme & enableTreeAndProperties) != 0;
     const bool withStatusBar = (theme & enableStatusBar) != 0;
+    const bool withWindowTabs = (theme & enableWindowTabs) != 0;
     if (event.ExceptionAddress == sites[rowFill].address) {
         // This call site fills the area occupied by the tree's rows.
         const auto original = static_cast<DWORD>(regs.Rsi);
@@ -226,14 +233,25 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
             callerAt(regs, 0x148) == frameBase + 0xA4638 &&
             !isDropdownPaint(regs, 0x268)) {
             regs.Rdx = backgroundBgr;
-        } else if ((withBars || withStatusBar) && (regs.EFlags & 0x40) == 0 &&
+        } else if ((withBars || withStatusBar || withWindowTabs) && (regs.EFlags & 0x40) == 0 &&
                    regs.Rdx == barBackgroundBgr &&
                    callerAt(regs, 0x218) == frameBase + 0x71A6DF) {
             const bool toolbar = withBars && callerAt(regs, 0x2E8) == graphicsBase + 0xADAE5;
             const bool status = withStatusBar &&
                 callerAt(regs, 0x2B8) == frameBase + 0x70FB7B &&
                 callerAt(regs, 0x478) == frameBase + 0x73213F;
-            if (toolbar || status) regs.Rdx = backgroundBgr;
+            const bool windowPanel = withWindowTabs &&
+                callerAt(regs, 0x2B8) == frameBase + 0x70FB7B &&
+                callerAt(regs, 0x478) == frameBase + windowPanelPaintReturn;
+            if (toolbar || status || windowPanel) regs.Rdx = backgroundBgr;
+        } else if (withWindowTabs && (regs.EFlags & 0x40) == 0 &&
+                   (regs.Rdx == platformActiveWindowTabBgr ||
+                    regs.Rdx == platformInactiveWindowTabBgr) &&
+                   callerAt(regs, 0x158) == frameBase + 0x733FCF &&
+                   callerAt(regs, 0x328) == frameBase + 0x739629 &&
+                   callerAt(regs, 0x588) == frameBase + windowTabPaintReturn) {
+            regs.Rdx = regs.Rdx == platformActiveWindowTabBgr ?
+                activeWindowTabBgr : inactiveWindowTabBgr;
         } else if (withProperties && (regs.EFlags & 0x40) == 0) {
             regs.Rdx = propertyFillColor(regs, static_cast<DWORD>(regs.Rdx));
         }
@@ -260,6 +278,12 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         } else if (withStatusBar && (argb == platformTextArgb || argb == statusMutedTextArgb) &&
                    caller == graphicsBase + 0x79821 && isStatusBarText(regs)) {
             argb = replaceRgb(argb, argb == statusMutedTextArgb ? statusMutedTextRgb : chromeTextRgb);
+        } else if (withWindowTabs && (argb == 0xFF222222 || argb == 0xFF333333) &&
+                   caller == graphicsBase + 0x79821 &&
+                   callerAt(regs, 0x578) == frameBase + 0x73480F &&
+                   callerAt(regs, 0x748) == frameBase + 0x739629 &&
+                   callerAt(regs, 0x9A8) == frameBase + windowTabPaintReturn) {
+            argb = replaceRgb(argb, chromeTextRgb);
         } else if (withProperties && caller == graphicsBase + 0x79821) {
             argb = propertyLabelColor(regs, argb);
         }

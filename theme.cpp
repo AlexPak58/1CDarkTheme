@@ -17,7 +17,9 @@ constexpr DWORD textRgb = 0x0080F2C2;
 constexpr DWORD barBackgroundBgr = 0x00DDF2F5;
 constexpr DWORD platformTextArgb = 0xFF413003;
 constexpr DWORD platformMutedTextArgb = 0xFFA08B54;
+constexpr DWORD statusMutedTextArgb = 0xFF9B8549;
 constexpr DWORD chromeTextRgb = 0x00E5EBF5;
+constexpr DWORD statusMutedTextRgb = 0x00A7B5C7;
 constexpr DWORD propertyMutedTextRgb = 0x00A7B5C7;
 constexpr DWORD propertyGroupTextRgb = 0x00B9D4FF;
 constexpr DWORD propertySelectionBgr = 0x008A5A30;
@@ -183,6 +185,22 @@ DWORD propertyLabelColor(const CONTEXT& registers, DWORD argb)
     return argb;
 }
 
+bool isStatusBarText(const CONTEXT& registers)
+{
+    if (callerAt(registers, 0x578) != frameBase + 0x73480F) return false;
+
+    // The message uses a different text renderer with a larger stack frame.
+    const auto renderer = callerAt(registers, 0x748);
+    const bool message = renderer == frameBase + 0x73B4D7;
+    if (!message && renderer != frameBase + 0x739499 && renderer != frameBase + 0x7397A8)
+        return false;
+
+    const ULONG_PTR shift = message ? 0x10 : 0;
+    return callerAt(registers, 0x8A8 + shift) == frameBase + 0x72A366 &&
+           callerAt(registers, 0x9F8 + shift) == frameBase + 0x70FBA5 &&
+           callerAt(registers, 0xBB8 + shift) == frameBase + 0x73213F;
+}
+
 LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
 {
     const auto& event = *exception->ExceptionRecord;
@@ -193,6 +211,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     const bool dark = theme != 0;
     const bool withBars = (theme & enableTreeAndBars) != 0;
     const bool withProperties = (theme & enableTreeAndProperties) != 0;
+    const bool withStatusBar = (theme & enableStatusBar) != 0;
     if (event.ExceptionAddress == sites[rowFill].address) {
         // This call site fills the area occupied by the tree's rows.
         const auto original = static_cast<DWORD>(regs.Rsi);
@@ -207,11 +226,14 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
             callerAt(regs, 0x148) == frameBase + 0xA4638 &&
             !isDropdownPaint(regs, 0x268)) {
             regs.Rdx = backgroundBgr;
-        } else if (withBars && (regs.EFlags & 0x40) == 0 && regs.Rdx == barBackgroundBgr &&
-                   callerAt(regs, 0x218) == frameBase + 0x71A6DF &&
-                   callerAt(regs, 0x2E8) == graphicsBase + 0xADAE5) {
-            // The status bar shares the frame fill caller, but not this stack path.
-            regs.Rdx = backgroundBgr;
+        } else if ((withBars || withStatusBar) && (regs.EFlags & 0x40) == 0 &&
+                   regs.Rdx == barBackgroundBgr &&
+                   callerAt(regs, 0x218) == frameBase + 0x71A6DF) {
+            const bool toolbar = withBars && callerAt(regs, 0x2E8) == graphicsBase + 0xADAE5;
+            const bool status = withStatusBar &&
+                callerAt(regs, 0x2B8) == frameBase + 0x70FB7B &&
+                callerAt(regs, 0x478) == frameBase + 0x73213F;
+            if (toolbar || status) regs.Rdx = backgroundBgr;
         } else if (withProperties && (regs.EFlags & 0x40) == 0) {
             regs.Rdx = propertyFillColor(regs, static_cast<DWORD>(regs.Rdx));
         }
@@ -235,6 +257,9 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
                    callerAt(regs, 0xB68) == frameBase + 0x5091F) {
             // The popup shares the renderer through frame+0x50CAE, then diverges.
             argb = replaceRgb(argb, chromeTextRgb);
+        } else if (withStatusBar && (argb == platformTextArgb || argb == statusMutedTextArgb) &&
+                   caller == graphicsBase + 0x79821 && isStatusBarText(regs)) {
+            argb = replaceRgb(argb, argb == statusMutedTextArgb ? statusMutedTextRgb : chromeTextRgb);
         } else if (withProperties && caller == graphicsBase + 0x79821) {
             argb = propertyLabelColor(regs, argb);
         }

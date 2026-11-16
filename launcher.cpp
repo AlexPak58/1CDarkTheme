@@ -97,6 +97,7 @@ int wmain(int argc, wchar_t** argv)
         else if (option == L"--bars") selection |= enableTreeAndBars;
         else if (option == L"--properties") selection |= enableTreeAndProperties;
         else if (option == L"--workspace") selection |= enableWorkspace;
+        else if (option == L"--status-bar") selection |= enableStatusBar;
         else {
             std::fwprintf(stderr, L"Unknown option: %ls\n", argv[i]);
             return 2;
@@ -104,7 +105,7 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc < 3 || !serverRef(argv[2])) {
         std::fputs("Usage: tree-theme-run.exe <1cv8.exe> <server\\ref>"
-                   " [--caption] [--bars] [--properties] [--workspace]\n", stderr);
+                   " [--caption] [--bars] [--properties] [--workspace] [--status-bar]\n", stderr);
         return 2;
     }
     if (!selection) selection = enableTreeOnly;

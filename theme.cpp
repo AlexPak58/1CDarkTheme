@@ -23,10 +23,14 @@ constexpr DWORD statusMutedTextRgb = 0x00A7B5C7;
 constexpr DWORD propertyMutedTextRgb = 0x00A7B5C7;
 constexpr DWORD propertyGroupTextRgb = 0x00B9D4FF;
 constexpr DWORD propertySelectionBgr = 0x008A5A30;
-constexpr DWORD activeWindowTabBgr = 0x008A5A30;
-constexpr DWORD inactiveWindowTabBgr = 0x004A372A;
+constexpr DWORD activeTabBgr = 0x008A5A30;
+constexpr DWORD inactiveTabBgr = 0x004A372A;
 constexpr DWORD platformActiveWindowTabBgr = 0x00E6CCB2;
 constexpr DWORD platformInactiveWindowTabBgr = 0x00B2B2B2;
+constexpr DWORD platformActiveTreeTabBgr = 0x00EBFAFC;
+constexpr DWORD platformInactiveTreeTabBgr = 0x00CCE6EB;
+constexpr DWORD platformTreeTabTextBgr = 0x00033041;
+constexpr ULONG_PTR treeTabVtable = 0xAD3D38;
 constexpr ULONG_PTR windowTabPaintReturn = 0x8EFC3A;
 constexpr ULONG_PTR windowPanelPaintReturn = 0x8EF5DD;
 constexpr ULONG_PTR propertyPaintReturn = 0x4F60ED;
@@ -41,13 +45,16 @@ struct Site {
     BYTE* address;
     std::array<BYTE, 3> instruction;
     DWORD protection;
+    BYTE length{3};
 };
 
-enum SiteIndex { rowFill, emptyFill, labelColor, workspaceFill };
+enum SiteIndex { rowFill, emptyFill, labelColor, workspaceFill, treeTabFill, treeTabText };
 Site sites[] = {
     {nullptr, {0x44, 0x8B, 0xC6}, 0}, // mov r8d, esi
     {nullptr, {0x0F, 0x45, 0xD0}, 0}, // cmovne edx, eax
     {nullptr, {0x41, 0x8B, 0xC0}, 0}, // mov eax, r8d
+    {nullptr, {0x44, 0x8B, 0xC0}, 0}, // mov r8d, eax
+    {nullptr, {0x8B, 0xD8}, 0, 2},  // mov ebx, eax
     {nullptr, {0x44, 0x8B, 0xC0}, 0}, // mov r8d, eax
 };
 
@@ -151,6 +158,18 @@ bool isDropdownPaint(const CONTEXT& registers, ULONG_PTR paintReturnSlot)
     }
 }
 
+bool isTreeTabStrip(ULONG_PTR receiver)
+{
+    // Docked tab strip in the layout observed on both BPDemo trees.
+    __try {
+        return *reinterpret_cast<const ULONG_PTR*>(receiver) == frameBase + treeTabVtable &&
+               *reinterpret_cast<const DWORD*>(receiver + 0x10C) == 2;
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
+                EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        return false;
+    }
+}
+
 DWORD propertyFillColor(const CONTEXT& registers, DWORD bgr)
 {
     const auto caller = callerAt(registers, 0x218);
@@ -219,6 +238,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     const bool withProperties = (theme & enableTreeAndProperties) != 0;
     const bool withStatusBar = (theme & enableStatusBar) != 0;
     const bool withWindowTabs = (theme & enableWindowTabs) != 0;
+    const bool withTreeTabs = (theme & enableTreeTabs) != 0;
     if (event.ExceptionAddress == sites[rowFill].address) {
         // This call site fills the area occupied by the tree's rows.
         const auto original = static_cast<DWORD>(regs.Rsi);
@@ -251,7 +271,12 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
                    callerAt(regs, 0x328) == frameBase + 0x739629 &&
                    callerAt(regs, 0x588) == frameBase + windowTabPaintReturn) {
             regs.Rdx = regs.Rdx == platformActiveWindowTabBgr ?
-                activeWindowTabBgr : inactiveWindowTabBgr;
+                activeTabBgr : inactiveTabBgr;
+        } else if (withTreeTabs && (regs.EFlags & 0x40) == 0 &&
+                   regs.Rdx == platformActiveTreeTabBgr &&
+                   callerAt(regs, 0x148) == frameBase + 0x5D33D5 &&
+                   callerAt(regs, 0x1F8) == frameBase + 0x5CE349) {
+            regs.Rdx = backgroundBgr;
         } else if (withProperties && (regs.EFlags & 0x40) == 0) {
             regs.Rdx = propertyFillColor(regs, static_cast<DWORD>(regs.Rdx));
         }
@@ -294,10 +319,25 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         const auto original = static_cast<DWORD>(regs.Rax);
         regs.R8 = (theme & enableWorkspace) && original == workspaceBackgroundBgr ?
             backgroundBgr : original;
+    } else if (event.ExceptionAddress == sites[treeTabFill].address) {
+        // The next instruction also saves EAX for the platform's brush.
+        const auto original = static_cast<DWORD>(regs.Rax);
+        if (withTreeTabs &&
+            (original == platformActiveTreeTabBgr || original == platformInactiveTreeTabBgr) &&
+            isTreeTabStrip(regs.R15)) {
+            regs.Rax = original == platformActiveTreeTabBgr ? activeTabBgr : inactiveTabBgr;
+        }
+        regs.Rbx = static_cast<DWORD>(regs.Rax);
+    } else if (event.ExceptionAddress == sites[treeTabText].address) {
+        const auto original = static_cast<DWORD>(regs.Rax);
+        regs.R8 = withTreeTabs && original == platformTreeTabTextBgr && isTreeTabStrip(regs.Rdi) ?
+            RGB(0xE5, 0xEB, 0xF5) : original;
     } else {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    regs.Rip = reinterpret_cast<ULONG_PTR>(event.ExceptionAddress) + 3;
+    const BYTE length = event.ExceptionAddress == sites[treeTabFill].address ?
+        sites[treeTabFill].length : 3;
+    regs.Rip = reinterpret_cast<ULONG_PTR>(event.ExceptionAddress) + length;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
@@ -316,8 +356,10 @@ DWORD installSites()
     sites[emptyFill].address = reinterpret_cast<BYTE*>(graphicsBase + 0xAEE4E);
     sites[labelColor].address = reinterpret_cast<BYTE*>(graphicsBase + 0x22D7);
     sites[workspaceFill].address = reinterpret_cast<BYTE*>(frameBase + 0x9518EC);
+    sites[treeTabFill].address = reinterpret_cast<BYTE*>(frameBase + 0x5D4B1E);
+    sites[treeTabText].address = reinterpret_cast<BYTE*>(frameBase + 0x5D4104);
     for (const auto& site : sites) {
-        if (std::memcmp(site.address, site.instruction.data(), site.instruction.size()) != 0)
+        if (std::memcmp(site.address, site.instruction.data(), site.length) != 0)
             return ERROR_INVALID_DATA;
     }
 

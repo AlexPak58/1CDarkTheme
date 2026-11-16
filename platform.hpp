@@ -15,6 +15,7 @@ inline constexpr ULONG_PTR enableTreeAndProperties = 8;
 inline constexpr ULONG_PTR enableWorkspace = 16;
 inline constexpr ULONG_PTR enableStatusBar = 32;
 inline constexpr ULONG_PTR enableWindowTabs = 64;
+inline constexpr ULONG_PTR enableTreeTabs = 128;
 
 inline constexpr auto exeHash =
     L"4C8E2F497CCC03747F60B3C6CC82350030C84484F6ED8AA9E40671FEACAF9BC6";

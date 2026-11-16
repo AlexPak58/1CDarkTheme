@@ -1,6 +1,7 @@
 """Compare x64 1C rendering binaries offline. Matches are not verified hooks."""
 
 import argparse
+from bisect import bisect_right
 import hashlib
 import json
 from pathlib import Path
@@ -428,6 +429,63 @@ def search_label_candidates(image, rva, code, reference_render):
                 }
 
 
+def spreadsheet_view_grid_candidates(image):
+    rva, code = image.text()
+    ro_rva, ro_size, ro_offset = image.sections.get(b".rdata", (0, 0, 0))
+    rodata = image.data[ro_offset:ro_offset + ro_size]
+    names = {}
+    for name in ("viewSettings", "showGrid", "showHeaders", "showPageBreaks"):
+        encoded = (name + "\0").encode("utf-16le")
+        for match in re.finditer(re.escape(encoded), rodata):
+            names[ro_rva + match.start()] = name
+
+    ranges = sorted(image.function_ranges())
+    starts = [begin for begin, _ in ranges]
+    references = {}
+    lea_pattern = rb"[\x48\x4c]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d](.{4})"
+    for match in re.finditer(lea_pattern, code, re.DOTALL):
+        target = rva + match.end() + struct.unpack("<i", match[1])[0]
+        name = names.get(target)
+        if name is None:
+            continue
+        address = rva + match.start()
+        index = bisect_right(starts, address) - 1
+        if index >= 0 and address < ranges[index][1]:
+            references.setdefault(starts[index], {}).setdefault(name, []).append(address)
+
+    for begin, sites in references.items():
+        if not {"showGrid", "showHeaders", "showPageBreaks"} <= sites.keys():
+            continue
+        start, end = max(sites["showGrid"]), min(sites["showHeaders"])
+        window = code[start - rva:end - rva]
+        if "viewSettings" in sites:
+            # Serialize the byte at +0x30 using the writer's boolean method.
+            role = "serialize"
+            marker = bytes.fromhex("41 0F B6 56 30 48 8B CE FF 50 58")
+            view_references = [min(sites["viewSettings"])]
+        else:
+            # The native XML reader is called after its caller matches viewSettings.
+            role = "deserialize"
+            marker = bytes.fromhex("41 88 45 30 E9")
+            view_references = []
+            for other_sites in references.values():
+                for address in other_sites.get("viewSettings", []):
+                    call = address + 0x3C
+                    offset = call - rva
+                    if code[offset:offset + 1] == b"\xe8" and offset + 5 <= len(code):
+                        target = call + 5 + struct.unpack_from("<i", code, offset + 1)[0]
+                        if target == begin:
+                            view_references.append(address)
+        for address in view_references:
+            for match in re.finditer(re.escape(marker), window):
+                yield {
+                    "role": role,
+                    "function": f"0x{begin:X}",
+                    "show_grid_access": f"0x{start + match.start():X}",
+                    "view_settings_reference": f"0x{address:X}",
+                }
+
+
 def compare(directory, signatures):
     result = {"directory": str(directory), "clients": [], "modules": {}}
     for name in ("1cv8.exe", "1cv8c.exe"):
@@ -476,6 +534,13 @@ def compare(directory, signatures):
                 image, rva, code, rgba_calls, set(calls.get("cairo_set_scaled_font", [])),
                 set(calls.get("cairo_fill", []))))
         result["modules"][name] = summary
+    path = directory / "moxel.dll"
+    if path.is_file():
+        image = Image(path)
+        result["modules"]["moxel.dll"] = {
+            "sha256": image.sha256(),
+            "spreadsheet_view_grid_candidates": list(spreadsheet_view_grid_candidates(image)),
+        }
     return result
 
 

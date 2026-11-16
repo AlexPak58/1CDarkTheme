@@ -103,7 +103,7 @@
             <StackPanel Margin="0,0,15,0">
                 <TextBlock x:Name="Status" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
                 <TextBlock Margin="0,5,0,0" TextWrapping="Wrap"
-                           Text="Опция для списков по умолчанию выключена. Проверены «Назначение расширения» и «Основной режим запуска». Редактор кода, поиск и выделение в дереве, значки, всплывающие меню и диалоги сохраняют свои цвета."/>
+                           Text="Для выпадающих меню можно настроить фон, полосу значков, текст и горячие клавиши. Цвет подсветки пункта задаёт платформа. Списки «Назначение расширения» и «Основной режим запуска» включаются отдельно."/>
             </StackPanel>
             <Button x:Name="LaunchButton" Grid.Column="1" VerticalAlignment="Center" Padding="14,8"
                     Content="Запустить Конфигуратор" Click="LaunchConfigurator"/>

@@ -12,6 +12,10 @@ constexpr DWORD rgbMask = 0x00FFFFFF;
 constexpr DWORD white = rgbMask;
 constexpr DWORD workspaceBackgroundBgr = 0x00BDD3D7;
 constexpr DWORD barBackgroundBgr = 0x00DDF2F5;
+constexpr DWORD platformPopupMenuBackgroundBgr = 0x00EBFAFC;
+constexpr DWORD platformPopupMenuGutterBgr = 0x00CCE6EB;
+constexpr DWORD platformPopupShortcutArgb = 0xFFB38000;
+constexpr ULONG_PTR popupMenuPaintReturn = 0x51331;
 constexpr DWORD platformTextArgb = 0xFF413003;
 constexpr DWORD platformMutedTextArgb = 0xFFA08B54;
 constexpr DWORD statusMutedTextArgb = 0xFF9B8549;
@@ -236,6 +240,33 @@ bool isStatusBarText(const CONTEXT& registers)
            callerAt(registers, 0xBB8 + shift) == frameBase + 0x73213F;
 }
 
+DWORD popupMenuFillColor(const CONTEXT& registers, DWORD bgr, const ThemeProfile& palette)
+{
+    if (callerAt(registers, 0x278) != frameBase + 0x70FB7B ||
+        callerAt(registers, 0x328) != frameBase + 0x50CAE ||
+        callerAt(registers, 0x438) != frameBase + popupMenuPaintReturn)
+        return bgr;
+
+    const auto painter = callerAt(registers, 0x218);
+    if (bgr == platformPopupMenuBackgroundBgr && painter == frameBase + 0x725205)
+        return toBgr(palette.colors[popupMenuBackground]);
+    if (bgr == platformPopupMenuGutterBgr && painter == frameBase + 0x7252B5)
+        return toBgr(palette.colors[popupMenuGutter]);
+    return bgr;
+}
+
+DWORD popupMenuLabelColor(const CONTEXT& registers, DWORD argb, const ThemeProfile& palette)
+{
+    const bool shortcut = argb == platformPopupShortcutArgb;
+    if ((!shortcut && argb != platformTextArgb) ||
+        callerAt(registers, 0xB68) != frameBase + popupMenuPaintReturn ||
+        callerAt(registers, 0x8A8) != frameBase + 0x70FC9C ||
+        callerAt(registers, 0x748) != frameBase + 0x739499 ||
+        callerAt(registers, 0x578) != frameBase + (shortcut ? 0x73499F : 0x73480F))
+        return argb;
+    return replaceRgb(argb, palette.colors[shortcut ? popupMenuShortcut : popupMenuText]);
+}
+
 LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
 {
     const auto& event = *exception->ExceptionRecord;
@@ -251,6 +282,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     const bool withStatusBar = (theme & enableStatusBar) != 0;
     const bool withWindowTabs = (theme & enableWindowTabs) != 0;
     const bool withTreeTabs = (theme & enableTreeTabs) != 0;
+    const bool withPopupMenu = (theme & enablePopupMenu) != 0;
     if (event.ExceptionAddress == sites[rowFill].address) {
         // This call site fills the area occupied by the tree's rows.
         const auto original = static_cast<DWORD>(regs.Rsi);
@@ -292,6 +324,9 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         } else if (withProperties && (regs.EFlags & 0x40) == 0) {
             regs.Rdx = propertyFillColor(regs, static_cast<DWORD>(regs.Rdx), colors);
         }
+        if (withPopupMenu && (regs.EFlags & 0x40) == 0 &&
+            (regs.Rdx == platformPopupMenuBackgroundBgr || regs.Rdx == platformPopupMenuGutterBgr))
+            regs.Rdx = popupMenuFillColor(regs, static_cast<DWORD>(regs.Rdx), colors);
     } else if (event.ExceptionAddress == sites[labelColor].address) {
         auto argb = static_cast<DWORD>(regs.R8);
         const auto caller = callerAt(regs, 0x38);
@@ -326,6 +361,8 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         } else if (withProperties && caller == graphicsBase + 0x79821) {
             argb = propertyLabelColor(regs, argb, colors);
         }
+        if (withPopupMenu && caller == graphicsBase + 0x79821)
+            argb = popupMenuLabelColor(regs, argb, colors);
         regs.R8 = argb;
         regs.Rax = argb;
     } else if (event.ExceptionAddress == sites[workspaceFill].address) {
@@ -462,7 +499,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetThemeProfile(LPVOID setting)
 {
     if (!setting) return ERROR_INVALID_PARAMETER;
     const auto& profile = *static_cast<const ThemeProfile*>(setting);
-    if (profile.size != sizeof(ThemeProfile) || profile.version != 1 || profile.zones > themeZoneMask)
+    if (profile.size != sizeof(ThemeProfile) || profile.version != 2 || profile.zones > themeZoneMask)
         return ERROR_INVALID_PARAMETER;
     for (const auto color : profile.colors) {
         if (color > rgbMask) return ERROR_INVALID_PARAMETER;

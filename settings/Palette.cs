@@ -13,9 +13,11 @@ internal sealed record Preset(string Name, int Mask, string[] Colors);
 
 internal static class Palette
 {
-    public const int AllZones = 511;
-    public const int ColorCount = 25;
-    private const int DefaultZones = 255;
+    public const int LegacyZones = 511;
+    public const int LegacyColorCount = 25;
+    public const int AllZones = 1023;
+    public const int ColorCount = 29;
+    private const int DefaultZones = 767;
     public const int MaxPresetName = 60;
     public const string DefaultName = "Тёмная";
     public const string GraphiteName = "Графитовая";
@@ -32,7 +34,8 @@ internal static class Palette
         new(32, "Строка состояния", 12, ["Фон", "Текст", "Приглушённый текст"]),
         new(64, "Вкладки открытых окон", 15, ["Фон панели", "Текст", "Активная вкладка", "Неактивная вкладка"]),
         new(128, "Вкладки под деревом", 19, ["Фон панели", "Текст", "Активная вкладка", "Неактивная вкладка"]),
-        new(256, "Выпадающие списки (эксперимент)", 23, ["Фон", "Текст"])
+        new(256, "Выпадающие списки (эксперимент)", 23, ["Фон", "Текст"]),
+        new(512, "Выпадающие меню", 25, ["Фон", "Полоса значков", "Текст", "Горячие клавиши"])
     ];
 
     private static readonly string[] Dark =
@@ -40,7 +43,8 @@ internal static class Palette
         "#1F2938", "#80F2C2", "#1F2938", "#E5EBF5", "#1F2938", "#E5EBF5",
         "#1F2938", "#E5EBF5", "#A7B5C7", "#B9D4FF", "#305A8A", "#1F2938",
         "#1F2938", "#E5EBF5", "#A7B5C7", "#1F2938", "#E5EBF5", "#305A8A",
-        "#2A374A", "#1F2938", "#E5EBF5", "#305A8A", "#2A374A", "#FFFFFF", "#000000"
+        "#2A374A", "#1F2938", "#E5EBF5", "#305A8A", "#2A374A", "#FFFFFF", "#000000",
+        "#1F2938", "#2A374A", "#E5EBF5", "#878B8F"
     ];
 
     public static readonly Preset[] BuiltIns =
@@ -51,7 +55,8 @@ internal static class Palette
             "#262629", "#F3CF93", "#262629", "#F3F0ED", "#262629", "#F3F0ED",
             "#262629", "#F3F0ED", "#BDB8B2", "#F3CF93", "#614742", "#262629",
             "#262629", "#F3F0ED", "#BDB8B2", "#262629", "#F3F0ED", "#614742",
-            "#3A373B", "#262629", "#F3F0ED", "#614742", "#3A373B", "#FFFFFF", "#000000"
+            "#3A373B", "#262629", "#F3F0ED", "#614742", "#3A373B", "#FFFFFF", "#000000",
+            "#262629", "#3A373B", "#F3F0ED", "#8E8882"
         ]),
         new(NativeName, 0, Dark)
     ];
@@ -79,6 +84,7 @@ internal static class Palette
 
 internal sealed class PresetStore
 {
+    private const int CurrentVersion = 2;
     private sealed record Document(int Version, Preset[] Presets);
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private string? _loadedHash;
@@ -96,24 +102,30 @@ internal sealed class PresetStore
         var loadedHash = Hash(input);
         input.Position = 0;
         var imported = JsonSerializer.Deserialize<Document>(input, JsonOptions);
-        if (imported is not { Version: 1, Presets: not null })
+        if (imported is not { Version: 1 or CurrentVersion, Presets: not null })
             throw new InvalidDataException("Неподдерживаемый формат файла пресетов.");
+        var legacy = imported.Version == 1;
+        var maxMask = legacy ? Palette.LegacyZones : Palette.AllZones;
+        var colorCount = legacy ? Palette.LegacyColorCount : Palette.ColorCount;
+        var presets = new List<Preset>(imported.Presets.Length);
         var names = new HashSet<string>(Palette.BuiltIns.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
         foreach (var preset in imported.Presets)
         {
             if (preset is null || !Palette.IsValidName(preset.Name) || !names.Add(preset.Name)
-                || preset.Mask is < 0 or > Palette.AllZones
-                || preset.Colors is not { Length: Palette.ColorCount })
+                || preset.Mask < 0 || preset.Mask > maxMask || preset.Colors?.Length != colorCount)
                 throw new InvalidDataException("Недопустимое имя, набор зон или число цветов.");
-            for (var i = 0; i < Palette.ColorCount; i++)
+            for (var i = 0; i < colorCount; i++)
             {
                 if (!Palette.TryNormalizeColor(preset.Colors[i], out var normalized))
                     throw new InvalidDataException("В пресете записан недопустимый цвет.");
                 preset.Colors[i] = normalized;
             }
+            presets.Add(legacy
+                ? preset with { Colors = [.. preset.Colors, .. Palette.BuiltIns[0].Colors.AsSpan(colorCount)] }
+                : preset);
         }
         _loadedHash = loadedHash;
-        return [.. imported.Presets];
+        return presets;
     }
 
     public void Save(IEnumerable<Preset> presets)
@@ -132,7 +144,7 @@ internal sealed class PresetStore
             string savedHash;
             using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
-                JsonSerializer.Serialize(output, new Document(1, [.. presets]), JsonOptions);
+                JsonSerializer.Serialize(output, new Document(CurrentVersion, [.. presets]), JsonOptions);
                 output.Flush(flushToDisk: true);
             }
             using (var saved = File.OpenRead(temporary))

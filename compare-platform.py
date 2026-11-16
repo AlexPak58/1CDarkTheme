@@ -12,6 +12,7 @@ REFERENCE_HASHES = {
     "frame.dll": "d2f4367c1f4de24747440a4cf963961585bdf0d854a3c324741f912db123f2d7",
     "grphcs.dll": "125c00c01e7780704ad3e2159170dd7e1a05ef8cf9b2ed32b0b30cb535c4a563",
 }
+PROPERTY_PAINT_RETURN = 0x4F60ED
 SITES = {
     "frame.dll": {
         "rowFill": 0x303454,
@@ -121,6 +122,9 @@ def reference_windows(reference_dir):
         rva, code = image.text()
         signatures[module] = {name: code[site - rva - 8:site - rva + 16]
                               for name, site in addresses.items()}
+        if module == "frame.dll":
+            offset = PROPERTY_PAINT_RETURN - rva
+            signatures[module]["property_paint"] = code[offset:offset + 24]
     return signatures
 
 
@@ -199,22 +203,81 @@ def frame_color_candidates(image, rva, code):
     return result
 
 
+def property_palette_candidates(image, rva, code, anchor):
+    imports = [(dll, slot) for dll, name, slot in image.imports()
+               if dll in {"wbase83.dll", "wbase85.dll"} and name.startswith("?fillSolidRect@wbase@@")]
+    if len(imports) != 1:
+        return
+    dll, slot = imports[0]
+    if dll == "wbase83.dll":
+        background_field, selection_field, text_slot = 0x37C, 0x390, 0x210
+        filter_suffix = bytes.fromhex("4C 8B 75 E0 8B 75 84 3B B7 40 03 00 00")
+    else:
+        background_field, selection_field, text_slot = 0x3AC, 0x3C0, 0x230
+        filter_suffix = bytes.fromhex("4C 8B 75 F0 8B 45 84 3B 87 70 03 00 00")
+
+    text_call = b"\x49\x8b\xd4\xff\x90" + struct.pack("<I", text_slot)
+    filter_call = b"\x41\xff\xd6" + filter_suffix
+    fields = (background_field, selection_field, background_field)
+    ranges = dict(image.function_ranges())
+    for paint in re.finditer(re.escape(anchor), code):
+        offset = paint.start()
+        if offset < 5 or code[offset - 5] != 0xE8:
+            continue
+        paint_return = rva + offset
+        renderer = paint_return + struct.unpack_from("<i", code, offset - 4)[0]
+        end = ranges.get(renderer, 0)
+        if not rva <= renderer < end <= rva + len(code):
+            continue
+        body = code[renderer - rva:end - rva]
+        fills = [match.end() for match in re.finditer(rb"\xff\x15(.{4})", body, re.S)
+                 if renderer + match.end() + struct.unpack("<i", match[1])[0] == slot]
+        if len(fills) != 4 or fills[1] < 23:
+            continue
+        if any(not body.startswith(b"\x44\x8b\x87" + struct.pack("<I", field), call_return - 23)
+               for call_return, field in zip(fills[1:], fields)):
+            continue
+
+        labels = [match.end() for match in re.finditer(re.escape(text_call), body)]
+        filtered = [match.start() + 3 for match in re.finditer(re.escape(filter_call), body)]
+        if len(labels) != 2 or len(filtered) != 1:
+            continue
+        if not fills[2] < labels[0] < filtered[0] < fills[3] < labels[1]:
+            continue
+        yield {
+            "paint_return": f"0x{paint_return:X}",
+            "renderer": f"0x{renderer:X}",
+            "fill_returns": {name: f"0x{renderer + site:X}" for name, site in
+                             zip(("row", "selection", "group"), fills[1:])},
+            "label_returns": {
+                "row": f"0x{renderer + labels[0]:X}",
+                "group": f"0x{renderer + labels[1]:X}",
+                "filtered": f"0x{renderer + filtered[0]:X}",
+            },
+            "background_field": f"0x{background_field:X}",
+            "selection_field": f"0x{selection_field:X}",
+            "label_slot": f"0x{text_slot:X}",
+        }
+
+
 def compare(directory, signatures):
     result = {"directory": str(directory), "clients": [], "modules": {}}
     for name in ("1cv8.exe", "1cv8c.exe"):
         if (directory / name).is_file():
             image = Image(directory / name)
             result["clients"].append({"name": name, "sha256": image.sha256()})
-    for name, sites in signatures.items():
+    for name, windows in signatures.items():
         image = Image(directory / name)
         rva, code = image.text()
         summary = {"sha256": image.sha256(), "exact_windows": {}}
-        for site, signature in sites.items():
+        for site in SITES[name]:
             # Lookahead includes overlapping matches, preserving ambiguity.
-            matches = re.finditer(b"(?=" + re.escape(signature) + b")", code)
+            matches = re.finditer(b"(?=" + re.escape(windows[site]) + b")", code)
             summary["exact_windows"][site] = [f"0x{rva + match.start() + 8:X}" for match in matches]
         if name == "frame.dll":
             summary["frame_color_candidates"] = frame_color_candidates(image, rva, code)
+            summary["property_palette_candidates"] = list(property_palette_candidates(
+                image, rva, code, windows["property_paint"]))
         elif name == "grphcs.dll":
             imports = {slot: symbol for dll, symbol, slot in image.imports()
                        if dll == "cairo.dll"

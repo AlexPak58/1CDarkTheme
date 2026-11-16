@@ -16,6 +16,39 @@ inline constexpr ULONG_PTR enableWorkspace = 16;
 inline constexpr ULONG_PTR enableStatusBar = 32;
 inline constexpr ULONG_PTR enableWindowTabs = 64;
 inline constexpr ULONG_PTR enableTreeTabs = 128;
+inline constexpr ULONG_PTR enableDropdown = 256;
+inline constexpr DWORD themeZoneMask = 511;
+
+enum PaletteColor : size_t {
+    treeBackground, treeText, captionBackground, captionText,
+    barsBackground, barsText,
+    propertyBackground, propertyText, propertyMutedText, propertyGroupText, propertySelection,
+    workspaceBackground, statusBackground, statusText, statusMutedText,
+    windowTabsBackground, windowTabsText, windowTabsActive, windowTabsInactive,
+    treeTabsBackground, treeTabsText, treeTabsActive, treeTabsInactive,
+    dropdownBackground, dropdownText,
+    paletteColorCount
+};
+
+// Versioned payload copied across the launcher/Configurator process boundary.
+struct ThemeProfile {
+    DWORD size{sizeof(ThemeProfile)};
+    DWORD version{1};
+    DWORD zones{255};
+    std::array<DWORD, paletteColorCount> colors{
+        0x1F2938, 0x80F2C2, 0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5,
+        0x1F2938, 0xE5EBF5, 0xA7B5C7, 0xB9D4FF, 0x305A8A, 0x1F2938,
+        0x1F2938, 0xE5EBF5, 0xA7B5C7, 0x1F2938, 0xE5EBF5, 0x305A8A, 0x2A374A,
+        0x1F2938, 0xE5EBF5, 0x305A8A, 0x2A374A, 0xFFFFFF, 0x000000
+    };
+};
+
+static_assert(sizeof(ThemeProfile) == (paletteColorCount + 3) * sizeof(DWORD));
+
+constexpr DWORD toBgr(DWORD rgb)
+{
+    return RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
+}
 
 inline constexpr auto exeHash =
     L"4C8E2F497CCC03747F60B3C6CC82350030C84484F6ED8AA9E40671FEACAF9BC6";

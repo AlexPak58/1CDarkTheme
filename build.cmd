@@ -31,6 +31,10 @@ cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 %THEME_DLL_FLAGS% /LD "%THEME
 if errorlevel 1 goto failed
 cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 %THEME_LAUNCHER_FLAGS% launcher.cpp /Fo"%THEME_BUILD_DIR%\launcher.obj" /Fe"%THEME_BUILD_DIR%\tree-theme-run.exe" bcrypt.lib user32.lib
 if errorlevel 1 goto failed
+if /i "%~2"=="settings" (
+    dotnet build settings\ConfiguratorThemeSettings.csproj -c Release --artifacts-path "%THEME_BUILD_DIR%\dotnet" -o "%THEME_BUILD_DIR%"
+    if errorlevel 1 goto failed
+)
 popd
 exit /b 0
 :failed

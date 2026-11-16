@@ -10,21 +10,11 @@ namespace {
 
 constexpr DWORD rgbMask = 0x00FFFFFF;
 constexpr DWORD white = rgbMask;
-constexpr DWORD backgroundRgb = 0x001F2938;
-constexpr DWORD backgroundBgr = 0x0038291F;
 constexpr DWORD workspaceBackgroundBgr = 0x00BDD3D7;
-constexpr DWORD textRgb = 0x0080F2C2;
 constexpr DWORD barBackgroundBgr = 0x00DDF2F5;
 constexpr DWORD platformTextArgb = 0xFF413003;
 constexpr DWORD platformMutedTextArgb = 0xFFA08B54;
 constexpr DWORD statusMutedTextArgb = 0xFF9B8549;
-constexpr DWORD chromeTextRgb = 0x00E5EBF5;
-constexpr DWORD statusMutedTextRgb = 0x00A7B5C7;
-constexpr DWORD propertyMutedTextRgb = 0x00A7B5C7;
-constexpr DWORD propertyGroupTextRgb = 0x00B9D4FF;
-constexpr DWORD propertySelectionBgr = 0x008A5A30;
-constexpr DWORD activeTabBgr = 0x008A5A30;
-constexpr DWORD inactiveTabBgr = 0x004A372A;
 constexpr DWORD platformActiveWindowTabBgr = 0x00E6CCB2;
 constexpr DWORD platformInactiveWindowTabBgr = 0x00B2B2B2;
 constexpr DWORD platformActiveTreeTabBgr = 0x00EBFAFC;
@@ -66,8 +56,12 @@ constexpr size_t installedSiteCount = std::size(sites);
 ULONG_PTR frameBase;
 ULONG_PTR graphicsBase;
 SRWLOCK installationLock = SRWLOCK_INIT;
+constexpr ThemeProfile defaultProfile{};
+ThemeProfile customProfile;
+std::atomic<const ThemeProfile*> activeProfile{&defaultProfile};
 std::atomic<ULONG_PTR> activeTheme{0};
-bool ready;
+DWORD installationResult = ERROR_NOT_READY;
+bool customApplied;
 
 HWND captionWindow;
 
@@ -111,7 +105,7 @@ HRESULT restoreCaption()
     return result;
 }
 
-HRESULT enableCaption()
+HRESULT enableCaption(const ThemeProfile& profile)
 {
     HWND window{};
     if (!EnumWindows(findCaptionWindow, reinterpret_cast<LPARAM>(&window)) || !window)
@@ -120,12 +114,12 @@ HRESULT enableCaption()
         const HRESULT restored = restoreCaption();
         if (FAILED(restored)) return restored;
     }
-    const COLORREF background = backgroundBgr;
+    const COLORREF background = toBgr(profile.colors[captionBackground]);
     HRESULT result = DwmSetWindowAttribute(window, captionColorAttribute,
                                            &background, sizeof(background));
     if (FAILED(result)) return result;
     captionWindow = window;
-    const COLORREF text = RGB(0xE5, 0xEB, 0xF5);
+    const COLORREF text = toBgr(profile.colors[captionText]);
     result = DwmSetWindowAttribute(window, captionTextColorAttribute, &text, sizeof(text));
     if (FAILED(result)) restoreCaption();
     return result;
@@ -163,6 +157,17 @@ bool isDropdownPaint(const CONTEXT& registers, ULONG_PTR paintReturnSlot)
     }
 }
 
+// The trees and this popup use a shared renderer with distinct receivers.
+DWORD listFill(const CONTEXT& regs, ULONG_PTR slot, DWORD original, ULONG_PTR zones,
+               const ThemeProfile& palette, bool useBgr)
+{
+    if (!(zones & (enableTreeOnly | enableDropdown))) return original;
+    const bool dropdown = isDropdownPaint(regs, slot);
+    if (!(zones & (dropdown ? enableDropdown : enableTreeOnly))) return original;
+    const DWORD fill = palette.colors[dropdown ? dropdownBackground : treeBackground];
+    return replaceRgb(original, useBgr ? toBgr(fill) : fill);
+}
+
 bool isTreeTabStrip(ULONG_PTR receiver)
 {
     // Docked tab strip in the layout observed on both BPDemo trees.
@@ -175,7 +180,7 @@ bool isTreeTabStrip(ULONG_PTR receiver)
     }
 }
 
-DWORD propertyFillColor(const CONTEXT& registers, DWORD bgr)
+DWORD propertyFillColor(const CONTEXT& registers, DWORD bgr, const ThemeProfile& profile)
 {
     const auto caller = callerAt(registers, 0x218);
     const bool background = bgr == white &&
@@ -183,34 +188,34 @@ DWORD propertyFillColor(const CONTEXT& registers, DWORD bgr)
     const bool selected = bgr == 0x00C26A53 && caller == frameBase + 0x4F9C51;
     if ((background || selected) &&
         callerAt(registers, 0x538) == frameBase + propertyPaintReturn)
-        return selected ? propertySelectionBgr : backgroundBgr;
+        return toBgr(profile.colors[selected ? propertySelection : propertyBackground]);
     return bgr;
 }
 
-DWORD propertyLabelColor(const CONTEXT& registers, DWORD argb)
+DWORD propertyLabelColor(const CONTEXT& registers, DWORD argb, const ThemeProfile& profile)
 {
     // The underlined value is drawn by a separate window from the property grid.
     if ((argb == platformTextArgb || argb == platformMutedTextArgb) &&
         callerAt(registers, 0x578) == frameBase + 0x5BD070 &&
         callerAt(registers, 0x608) == frameBase + 0x5B9393 &&
         callerAt(registers, 0xA78) == frameBase + 0x5B5C5D)
-        return replaceRgb(argb, argb == platformTextArgb ? chromeTextRgb : propertyMutedTextRgb);
+        return replaceRgb(argb, profile.colors[argb == platformTextArgb ? propertyText : propertyMutedText]);
 
     // The search renderer draws the matching and ordinary fragments separately.
     if (argb == platformTextArgb &&
         callerAt(registers, 0x688) == frameBase + 0x4F9FF9 &&
         callerAt(registers, 0x9A8) == frameBase + propertyPaintReturn)
-        return replaceRgb(argb, chromeTextRgb);
+        return replaceRgb(argb, profile.colors[propertyText]);
 
     const auto caller = callerAt(registers, 0x4F8);
     if ((caller != frameBase + 0x4F9E04 && caller != frameBase + 0x4FA40D) ||
         callerAt(registers, 0x818) != frameBase + propertyPaintReturn) return argb;
 
     if (caller == frameBase + 0x4FA40D && argb == 0xFF594304)
-        return replaceRgb(argb, propertyGroupTextRgb);
+        return replaceRgb(argb, profile.colors[propertyGroupText]);
     if (caller == frameBase + 0x4F9E04) {
-        if (argb == platformTextArgb) return replaceRgb(argb, chromeTextRgb);
-        if (argb == platformMutedTextArgb) return replaceRgb(argb, propertyMutedTextRgb);
+        if (argb == platformTextArgb) return replaceRgb(argb, profile.colors[propertyText]);
+        if (argb == platformMutedTextArgb) return replaceRgb(argb, profile.colors[propertyMutedText]);
     }
     return argb;
 }
@@ -237,8 +242,10 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     if (event.ExceptionCode != EXCEPTION_BREAKPOINT) return EXCEPTION_CONTINUE_SEARCH;
 
     auto& regs = *exception->ContextRecord;
-    const ULONG_PTR theme = activeTheme.load(std::memory_order_relaxed);
-    const bool dark = theme != 0;
+    const ULONG_PTR theme = activeTheme.load(std::memory_order_acquire);
+    const auto& colors = *activeProfile.load(std::memory_order_relaxed);
+    const bool dark = (theme & enableTreeOnly) != 0;
+    const bool withLists = (theme & (enableTreeOnly | enableDropdown)) != 0;
     const bool withBars = (theme & enableTreeAndBars) != 0;
     const bool withProperties = (theme & enableTreeAndProperties) != 0;
     const bool withStatusBar = (theme & enableStatusBar) != 0;
@@ -247,17 +254,15 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     if (event.ExceptionAddress == sites[rowFill].address) {
         // This call site fills the area occupied by the tree's rows.
         const auto original = static_cast<DWORD>(regs.Rsi);
-        regs.R8 = dark && (original & rgbMask) == white &&
-                  !isDropdownPaint(regs, 0x3D8) ?
-            replaceRgb(original, backgroundBgr) : original;
+        regs.R8 = (original & rgbMask) == white ?
+            listFill(regs, 0x3D8, original, theme, colors, true) : original;
     } else if (event.ExceptionAddress == sites[emptyFill].address) {
         // CMOVNE selects the low 32 bits and clears the high 32 bits.
         regs.Rdx = static_cast<DWORD>((regs.EFlags & 0x40) == 0 ? regs.Rax : regs.Rdx);
-        if (dark && static_cast<DWORD>(regs.Rdx) == white &&
+        if (withLists && static_cast<DWORD>(regs.Rdx) == white &&
             callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
-            callerAt(regs, 0x148) == frameBase + 0xA4638 &&
-            !isDropdownPaint(regs, 0x268)) {
-            regs.Rdx = backgroundBgr;
+            callerAt(regs, 0x148) == frameBase + 0xA4638) {
+            regs.Rdx = listFill(regs, 0x268, white, theme, colors, true);
         } else if ((withBars || withStatusBar || withWindowTabs) && (regs.EFlags & 0x40) == 0 &&
                    regs.Rdx == barBackgroundBgr &&
                    callerAt(regs, 0x218) == frameBase + 0x71A6DF) {
@@ -268,7 +273,9 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
             const bool windowPanel = withWindowTabs &&
                 callerAt(regs, 0x2B8) == frameBase + 0x70FB7B &&
                 callerAt(regs, 0x478) == frameBase + windowPanelPaintReturn;
-            if (toolbar || status || windowPanel) regs.Rdx = backgroundBgr;
+            if (toolbar) regs.Rdx = toBgr(colors.colors[barsBackground]);
+            if (status) regs.Rdx = toBgr(colors.colors[statusBackground]);
+            if (windowPanel) regs.Rdx = toBgr(colors.colors[windowTabsBackground]);
         } else if (withWindowTabs && (regs.EFlags & 0x40) == 0 &&
                    (regs.Rdx == platformActiveWindowTabBgr ||
                     regs.Rdx == platformInactiveWindowTabBgr) &&
@@ -276,46 +283,48 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
                    callerAt(regs, 0x328) == frameBase + 0x739629 &&
                    callerAt(regs, 0x588) == frameBase + windowTabPaintReturn) {
             regs.Rdx = regs.Rdx == platformActiveWindowTabBgr ?
-                activeTabBgr : inactiveTabBgr;
+                toBgr(colors.colors[windowTabsActive]) : toBgr(colors.colors[windowTabsInactive]);
         } else if (withTreeTabs && (regs.EFlags & 0x40) == 0 &&
                    regs.Rdx == platformActiveTreeTabBgr &&
                    callerAt(regs, 0x148) == frameBase + 0x5D33D5 &&
                    callerAt(regs, 0x1F8) == frameBase + 0x5CE349) {
-            regs.Rdx = backgroundBgr;
+            regs.Rdx = toBgr(colors.colors[treeTabsBackground]);
         } else if (withProperties && (regs.EFlags & 0x40) == 0) {
-            regs.Rdx = propertyFillColor(regs, static_cast<DWORD>(regs.Rdx));
+            regs.Rdx = propertyFillColor(regs, static_cast<DWORD>(regs.Rdx), colors);
         }
     } else if (event.ExceptionAddress == sites[labelColor].address) {
         auto argb = static_cast<DWORD>(regs.R8);
         const auto caller = callerAt(regs, 0x38);
-        if (dark && (argb & rgbMask) == white && caller == graphicsBase + 0x7905B &&
-            callerAt(regs, 0x4B8) == frameBase + 0x85F475 &&
-            !isDropdownPaint(regs, 0xCB8)) {
-            argb = replaceRgb(argb, backgroundRgb);
-        } else if (dark && (argb & rgbMask) == 0 && caller == graphicsBase + 0x79821 &&
-                   ((callerAt(regs, 0x578) == frameBase + 0x85F475 &&
-                     !isDropdownPaint(regs, 0xD78)) ||
-                    callerAt(regs, 0x688) == frameBase + 0x85F2CD)) {
-            // The second caller draws separate fragments of filtered tree labels.
-            argb = replaceRgb(argb, textRgb);
+        if (withLists && (argb & rgbMask) == white && caller == graphicsBase + 0x7905B &&
+            callerAt(regs, 0x4B8) == frameBase + 0x85F475) {
+            argb = listFill(regs, 0xCB8, argb, theme, colors, false);
+        } else if (withLists && (argb & rgbMask) == 0 && caller == graphicsBase + 0x79821) {
+            if (callerAt(regs, 0x578) == frameBase + 0x85F475) {
+                const bool dropdown = isDropdownPaint(regs, 0xD78);
+                if (theme & (dropdown ? enableDropdown : enableTreeOnly))
+                    argb = replaceRgb(argb, colors.colors[dropdown ? dropdownText : treeText]);
+            } else if (dark && callerAt(regs, 0x688) == frameBase + 0x85F2CD) {
+                // Separate fragments of filtered tree labels.
+                argb = replaceRgb(argb, colors.colors[treeText]);
+            }
         } else if (withBars && argb == platformTextArgb && caller == graphicsBase + 0x79821 &&
                    callerAt(regs, 0x578) == frameBase + 0x73480F &&
                    callerAt(regs, 0x748) == frameBase + 0x739499 &&
                    callerAt(regs, 0x8A8) == frameBase + 0x70FC9C &&
                    callerAt(regs, 0xB68) == frameBase + 0x5091F) {
             // The popup shares the renderer through frame+0x50CAE, then diverges.
-            argb = replaceRgb(argb, chromeTextRgb);
+            argb = replaceRgb(argb, colors.colors[barsText]);
         } else if (withStatusBar && (argb == platformTextArgb || argb == statusMutedTextArgb) &&
                    caller == graphicsBase + 0x79821 && isStatusBarText(regs)) {
-            argb = replaceRgb(argb, argb == statusMutedTextArgb ? statusMutedTextRgb : chromeTextRgb);
+            argb = replaceRgb(argb, colors.colors[argb == statusMutedTextArgb ? statusMutedText : statusText]);
         } else if (withWindowTabs && (argb == 0xFF222222 || argb == 0xFF333333) &&
                    caller == graphicsBase + 0x79821 &&
                    callerAt(regs, 0x578) == frameBase + 0x73480F &&
                    callerAt(regs, 0x748) == frameBase + 0x739629 &&
                    callerAt(regs, 0x9A8) == frameBase + windowTabPaintReturn) {
-            argb = replaceRgb(argb, chromeTextRgb);
+            argb = replaceRgb(argb, colors.colors[windowTabsText]);
         } else if (withProperties && caller == graphicsBase + 0x79821) {
-            argb = propertyLabelColor(regs, argb);
+            argb = propertyLabelColor(regs, argb, colors);
         }
         regs.R8 = argb;
         regs.Rax = argb;
@@ -323,20 +332,20 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         // Only the empty workspace's standard fill. Preserve other platform colors.
         const auto original = static_cast<DWORD>(regs.Rax);
         regs.R8 = (theme & enableWorkspace) && original == workspaceBackgroundBgr ?
-            backgroundBgr : original;
+            toBgr(colors.colors[workspaceBackground]) : original;
     } else if (event.ExceptionAddress == sites[treeTabFill].address) {
         // The next instruction also saves EAX for the platform's brush.
         const auto original = static_cast<DWORD>(regs.Rax);
         if (withTreeTabs &&
             (original == platformActiveTreeTabBgr || original == platformInactiveTreeTabBgr) &&
             isTreeTabStrip(regs.R15)) {
-            regs.Rax = original == platformActiveTreeTabBgr ? activeTabBgr : inactiveTabBgr;
+            regs.Rax = toBgr(colors.colors[original == platformActiveTreeTabBgr ? treeTabsActive : treeTabsInactive]);
         }
         regs.Rbx = static_cast<DWORD>(regs.Rax);
     } else if (event.ExceptionAddress == sites[treeTabText].address) {
         const auto original = static_cast<DWORD>(regs.Rax);
         regs.R8 = withTreeTabs && original == platformTreeTabTextBgr && isTreeTabStrip(regs.Rdi) ?
-            RGB(0xE5, 0xEB, 0xF5) : original;
+            toBgr(colors.colors[treeTabsText]) : original;
     } else {
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -422,20 +431,50 @@ DWORD installSites()
     return error;
 }
 
+DWORD applyProfile(const ThemeProfile& profile, ULONG_PTR zones)
+{
+    if (zones && (installationResult == ERROR_NOT_READY || installationResult == ERROR_MOD_NOT_FOUND))
+        installationResult = installSites();
+    if (zones && installationResult != ERROR_SUCCESS) return installationResult;
+
+    const HRESULT captionResult = (zones & enableTreeAndCaption) ? enableCaption(profile) : restoreCaption();
+    if (FAILED(captionResult)) return static_cast<DWORD>(captionResult);
+    activeProfile.store(&profile, std::memory_order_relaxed);
+    activeTheme.store(zones, std::memory_order_release);
+    return ERROR_SUCCESS;
+}
+
 } // namespace
 
 extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
 {
-    AcquireSRWLockExclusive(&installationLock);
-    static DWORD result = ERROR_NOT_READY;
-    if (setting && result == ERROR_NOT_READY) {
-        result = installSites();
-        ready = result == ERROR_SUCCESS;
-    }
     const auto requested = reinterpret_cast<ULONG_PTR>(setting);
-    const bool withCaption = (requested & enableTreeAndCaption) != 0;
-    const HRESULT captionResult = ready && withCaption ? enableCaption() : restoreCaption();
-    activeTheme.store(ready && SUCCEEDED(captionResult) ? requested : 0, std::memory_order_relaxed);
+    if (requested > 255) return ERROR_INVALID_PARAMETER;
+    AcquireSRWLockExclusive(&installationLock);
+    const DWORD result = customApplied ? ERROR_ALREADY_ASSIGNED :
+        applyProfile(defaultProfile, requested ? requested | enableTreeOnly : 0);
     ReleaseSRWLockExclusive(&installationLock);
-    return FAILED(captionResult) ? static_cast<DWORD>(captionResult) : result;
+    return result;
 }
+
+#ifndef THEME_BACKGROUND_ONLY
+extern "C" __declspec(dllexport) DWORD WINAPI SetThemeProfile(LPVOID setting)
+{
+    if (!setting) return ERROR_INVALID_PARAMETER;
+    const auto& profile = *static_cast<const ThemeProfile*>(setting);
+    if (profile.size != sizeof(ThemeProfile) || profile.version != 1 || profile.zones > themeZoneMask)
+        return ERROR_INVALID_PARAMETER;
+    for (const auto color : profile.colors) {
+        if (color > rgbMask) return ERROR_INVALID_PARAMETER;
+    }
+    AcquireSRWLockExclusive(&installationLock);
+    DWORD result = ERROR_ALREADY_ASSIGNED;
+    if (!customApplied) {
+        customProfile = profile;
+        result = applyProfile(customProfile, profile.zones);
+        customApplied = result == ERROR_SUCCESS;
+    }
+    ReleaseSRWLockExclusive(&installationLock);
+    return result;
+}
+#endif

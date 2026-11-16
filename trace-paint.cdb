@@ -1,0 +1,7 @@
+.echo One sample per call site. Trigger one repaint, then break and detach with qd.
+bp /1 frame+0x11a520 ".printf \"frame CreateSolidBrush COLORREF=%08x\n\", @ecx; k 8; gc"
+bp /1 frame+0x11a5ec ".printf \"frame SetTextColor COLORREF=%08x\n\", @edx; k 8; gc"
+bp /1 frame+0x5897a5 ".printf \"frame SetBkColor COLORREF=%08x\n\", @edx; k 8; gc"
+bp /1 grphcs+0x2330 ".echo grphcs cairo_set_source_rgba; k 8; gc"
+bl
+g

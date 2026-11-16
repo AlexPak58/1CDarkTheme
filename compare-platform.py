@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import struct
+import uuid
 
 
 REFERENCE_HASHES = {
@@ -13,6 +14,13 @@ REFERENCE_HASHES = {
     "grphcs.dll": "125c00c01e7780704ad3e2159170dd7e1a05ef8cf9b2ed32b0b30cb535c4a563",
 }
 PROPERTY_PAINT_RETURN = 0x4F60ED
+SEARCH_LABEL_RENDER_RETURN = 0x5BD070
+SEARCH_LABEL_CLASS_ID = uuid.UUID("4f2defd2-5243-4166-b7f2-3e7ffc5f6394").bytes_le
+SEARCH_LABEL_LAYOUTS = {
+    (0xC20, 0xC38): (0x218, 0x110),
+    (0xC68, 0xC80): (0x238, 0x120),
+}
+SEARCH_LABEL_RENDER_85 = bytes.fromhex("FF 90 38 02 00 00 41 80 BF 0A 0C 00 00 00")
 DROPDOWN_DESCRIPTOR = 0xA8A7A0
 DROPDOWN_DISPATCH_PREFIX = bytes.fromhex(
     "48 83 EC 48 48 8B 01 C7 44 24 30 64 00 00 00 "
@@ -131,6 +139,8 @@ def reference_windows(reference_dir):
         if module == "frame.dll":
             offset = PROPERTY_PAINT_RETURN - rva
             signatures[module]["property_paint"] = code[offset:offset + 24]
+            offset = SEARCH_LABEL_RENDER_RETURN - rva - 12
+            signatures[module]["search_label_render"] = code[offset:offset + 24]
             signatures[module]["dropdown_descriptors"] = dropdown_descriptors(image, DROPDOWN_DESCRIPTOR)
             if signatures[module]["dropdown_descriptors"] is None:
                 raise ValueError(f"{image.path}: missing reference dropdown descriptors")
@@ -332,6 +342,92 @@ def dropdown_candidates(image, rva, code, descriptors):
                     }
 
 
+def search_label_factories(image, rva, code):
+    data_rva, data_size, data_offset = image.sections.get(b".data", (0, 0, 0))
+    ro_rva, ro_size, ro_offset = image.sections.get(b".rdata", (0, 0, 0))
+    data = image.data[data_offset:data_offset + data_size]
+    ro_data = image.data[ro_offset:ro_offset + ro_size]
+    factory_prefix = b"\x48\x85\xc9\x0f\x84"
+    constructor_layouts = ((0x54, 0x73, b"\x48\x89\x03"), (0x67, 0x9D, b"\x48\x89\x43\x18"))
+    ranges = dict(image.function_ranges())
+    # This ID also appears in other modules. Validate both constructor branches.
+    for identifier in re.finditer(re.escape(SEARCH_LABEL_CLASS_ID), ro_data):
+        address = image.image_base + ro_rva + identifier.start()
+        for entry in re.finditer(re.escape(struct.pack("<Q", address)), data):
+            record = data_rva + entry.start()
+            if record % 8 or entry.start() + 0x20 > len(data):
+                continue
+            factory = struct.unpack_from("<Q", data, entry.start() + 0x18)[0] - image.image_base
+            begin = factory - rva
+            if not 0 <= begin <= len(code) - 14 or not code.startswith(factory_prefix, begin):
+                continue
+            if code[begin + 9] != 0xE9:
+                continue
+            targets = [factory + end + struct.unpack_from("<i", code, begin + end - 4)[0]
+                       for end in (9, 14)]
+            sizes, tables, initializers = [], [], []
+            for target, (size_offset, table_offset, store) in zip(targets, constructor_layouts):
+                allocation = target + size_offset - rva
+                load = target + table_offset - rva
+                store_end = load + 7 + len(store)
+                if not 0 <= allocation <= load - 10 or store_end > len(code):
+                    break
+                if ranges.get(target, 0) < rva + store_end:
+                    break
+                if (code[allocation] != 0xB9 or code[load - 5] != 0xE8
+                        or code[load:load + 3] != b"\x48\x8d\x05"
+                        or not code.startswith(store, load + 7)):
+                    break
+                table = rva + load + 7 + struct.unpack_from("<i", code, load + 3)[0]
+                if table % 8 or not ro_rva <= table <= ro_rva + ro_size - 8:
+                    break
+                first_method = struct.unpack_from("<Q", ro_data, table - ro_rva)[0] - image.image_base
+                if not rva <= first_method < rva + len(code):
+                    break
+                tables.append(table)
+                sizes.append(struct.unpack_from("<I", code, allocation + 1)[0])
+                initializers.append(rva + load + struct.unpack_from("<i", code, load - 4)[0])
+            if tuple(sizes) in SEARCH_LABEL_LAYOUTS and initializers[0] == initializers[1]:
+                yield factory, tables, tuple(sizes)
+
+
+def search_label_candidates(image, rva, code, reference_render):
+    ranges = list(image.function_ranges())
+    for factory, tables, sizes in search_label_factories(image, rva, code):
+        text_slot, color_slot = SEARCH_LABEL_LAYOUTS[sizes]
+        # The 8.3 window straddles the call return. In 8.5 it starts at the call.
+        signature, return_offset = ((reference_render, 12) if text_slot == 0x218
+                                    else (SEARCH_LABEL_RENDER_85, 6))
+        text_call = b"\xff\x90" + struct.pack("<I", text_slot)
+        color_call = b"\xff\x90" + struct.pack("<I", color_slot)
+        for match in re.finditer(re.escape(signature), code):
+            normal_return = match.start() + return_offset
+            if not code.startswith(text_call, normal_return - len(text_call)):
+                continue
+            call_rva = rva + normal_return - len(text_call)
+            for begin, end in ranges:
+                if not begin <= call_rva < end <= rva + len(code):
+                    continue
+                body = code[begin - rva:end - rva]
+                returns = [begin + site.end() for site in re.finditer(re.escape(text_call), body)]
+                if len(returns) != 3 or returns[-1] != rva + normal_return:
+                    continue
+                if (body.count(color_call) != 4 or bytes.fromhex("E0 E0 E0 00") not in body
+                        or bytes.fromhex("54 54 54 00") not in body):
+                    continue
+                yield {
+                    "factory": f"0x{factory:X}",
+                    "search_label_vtable": f"0x{tables[0]:X}",
+                    "open_link_vtable": f"0x{tables[1]:X}",
+                    "allocation_sizes": [f"0x{size:X}" for size in sizes],
+                    "renderer_range_start": f"0x{begin:X}",
+                    "normal_text_return": f"0x{returns[-1]:X}",
+                    "text_returns": [f"0x{return_rva:X}" for return_rva in returns],
+                    "graphics_text_slot": f"0x{text_slot:X}",
+                    "graphics_color_slot": f"0x{color_slot:X}",
+                }
+
+
 def compare(directory, signatures):
     result = {"directory": str(directory), "clients": [], "modules": {}}
     for name in ("1cv8.exe", "1cv8c.exe"):
@@ -352,6 +448,8 @@ def compare(directory, signatures):
                 image, rva, code, windows["property_paint"]))
             summary["dropdown_candidates"] = list(dropdown_candidates(
                 image, rva, code, windows["dropdown_descriptors"]))
+            summary["search_label_candidates"] = list(search_label_candidates(
+                image, rva, code, windows["search_label_render"]))
         elif name == "grphcs.dll":
             imports = {slot: symbol for dll, symbol, slot in image.imports()
                        if dll == "cairo.dll"

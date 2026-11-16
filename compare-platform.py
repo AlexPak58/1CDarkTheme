@@ -28,6 +28,14 @@ SITES = {
 CAIRO_COLORS = {"cairo_set_source_rgb", "cairo_set_source_rgba"}
 # cmp [rdi+60h],4; mov edx,eax; not edx; mov rcx,rdi; cmovne edx,eax; call rel32
 FILL_PREFIX = bytes.fromhex("83 7F 60 04 8B D0 F7 D2 48 8B CF 0F 45 D0 E8")
+# Glyph run: load the packed color address, then call the converter before setting the font.
+# The converter extracts blue from bits 0–7 in 8.3 and 16–23 in 8.5.
+TEXT_COLOR_LAYOUTS = (
+    ("AARRGGBB", bytes.fromhex("49 8D 51 4C 48 8B CD E8"), 0x9C, 0x60,
+     bytes.fromhex("C1 E8 18 66 0F 6E E0 41 0F B6 C0 F3 0F E6 E4 66 0F 6E D8")),
+    ("AABBGGRR", bytes.fromhex("4A 8D 14 08 48 8B CE E8"), 0x72, 0x61,
+     bytes.fromhex("C1 E8 18 66 0F 6E E0 41 8B C0 C1 E8 10 0F B6 C0 F3 0F E6 E4 66 0F 6E D8")),
+)
 FRAME_COLOR_PATTERNS = {
     "k83MenuTextCOLORREF": "48 8B 05 ?? ?? ?? ?? BB FF FF FF 00 8B 30 74 ??",
     "k83MenuSelectBackColor": "48 8B 15 ?? ?? ?? ?? 48 8B 00 FF 90 ?? 02 00 00 8B D8",
@@ -76,6 +84,12 @@ class Image:
         rva, size, offset = self.sections[b".text"]
         return rva, self.data[offset:offset + size]
 
+    def function_ranges(self):
+        _, size, offset = self.sections.get(b".pdata", (0, 0, 0))
+        for begin, end, _ in struct.iter_unpack("<III", self.data[offset:offset + size - size % 12]):
+            if begin < end:
+                yield begin, end
+
     def sha256(self):
         return hashlib.sha256(self.data).hexdigest()
 
@@ -120,6 +134,49 @@ def fill_candidates(rva, code, rgba_calls):
                    "callee": f"0x{callee:X}", "rgba_call": f"0x{rgba_call:X}"}
 
 
+def text_color_candidates(image, rva, code, rgba_calls, font_calls, fill_calls):
+    ranges = list(image.function_ranges())
+    # The two callers step over original glyph runs and temporary fragments, respectively.
+    run_calls = []
+    for match in re.finditer(rb"(?=(\xe8(.{4})\x48\x83(?:\xc3\x60|\xc7\x68)))", code, re.S):
+        caller = rva + match.start()
+        target = caller + 5 + struct.unpack("<i", match[2])[0]
+        run_calls.append((caller, target, match[1][-1]))
+    for packing, prefix, call_offset, rgba_offset, channel_bytes in TEXT_COLOR_LAYOUTS:
+        for match in re.finditer(re.escape(prefix) + b"(.{4})", code, re.S):
+            caller = rva + match.end() - 5
+            converter = caller + 5 + struct.unpack("<i", match[1])[0]
+            rgba_call = converter + rgba_offset
+            renderer = caller - call_offset
+            if rgba_call not in rgba_calls or caller + 0x15 not in font_calls:
+                continue
+            if not code.startswith(channel_bytes, converter + 0x12 - rva):
+                continue
+            if not any(begin == renderer and caller + 0x15 < end for begin, end in ranges):
+                continue
+            enclosing = {}
+            for site, target, stride in run_calls:
+                if target != renderer:
+                    continue
+                for bounds in ranges:
+                    if bounds[0] <= site < bounds[1]:
+                        enclosing.setdefault(bounds, {}).setdefault(stride, []).append(site)
+            for (begin, end), sites in enclosing.items():
+                if set(sites) != {0x60, 0x68}:
+                    continue
+                backgrounds = sorted(site for site in rgba_calls
+                                     if begin <= site < end and site + 9 in fill_calls)
+                yield {
+                    "packing_candidate": packing,
+                    "glyph_rgba_call": f"0x{rgba_call:X}",
+                    "glyph_color_return": f"0x{caller + 5:X}",
+                    "range_renderer": f"0x{begin:X}",
+                    "original_run_calls": [f"0x{site:X}" for site in sites[0x60]],
+                    "fragment_run_calls": [f"0x{site:X}" for site in sites[0x68]],
+                    "range_background_rgba_calls": [f"0x{site:X}" for site in backgrounds],
+                }
+
+
 def frame_color_candidates(image, rva, code):
     slots = {}
     for dll, symbol, slot in image.imports():
@@ -160,8 +217,10 @@ def compare(directory, signatures):
             summary["frame_color_candidates"] = frame_color_candidates(image, rva, code)
         elif name == "grphcs.dll":
             imports = {slot: symbol for dll, symbol, slot in image.imports()
-                       if dll == "cairo.dll" and symbol in CAIRO_COLORS}
-            summary["cairo_imports"] = {symbol: f"0x{slot:X}" for slot, symbol in imports.items()}
+                       if dll == "cairo.dll"
+                       and symbol in CAIRO_COLORS | {"cairo_set_scaled_font", "cairo_fill"}}
+            summary["cairo_imports"] = {symbol: f"0x{slot:X}" for slot, symbol in imports.items()
+                                        if symbol in CAIRO_COLORS}
             # Opcode candidates only. Confirm instruction boundaries with a disassembler.
             calls = {symbol: [] for symbol in imports.values()}
             for match in re.finditer(b"(?=\xff\x15)", code):
@@ -174,10 +233,13 @@ def compare(directory, signatures):
                     calls[symbol].append(rva + offset)
             summary["cairo_call_candidates"] = {
                 symbol: [f"0x{address:X}" for address in addresses]
-                for symbol, addresses in calls.items()
+                for symbol, addresses in calls.items() if symbol in CAIRO_COLORS
             }
             rgba_calls = set(calls.get("cairo_set_source_rgba", []))
             summary["fill_rgba_candidates"] = list(fill_candidates(rva, code, rgba_calls))
+            summary["text_color_candidates"] = list(text_color_candidates(
+                image, rva, code, rgba_calls, set(calls.get("cairo_set_scaled_font", [])),
+                set(calls.get("cairo_fill", []))))
         result["modules"][name] = summary
     return result
 

@@ -28,6 +28,7 @@ constexpr ULONG_PTR treeTabVtable = 0xAD3D38;
 constexpr ULONG_PTR windowTabPaintReturn = 0x8EFC3A;
 constexpr ULONG_PTR windowPanelPaintReturn = 0x8EF5DD;
 constexpr ULONG_PTR propertyPaintReturn = 0x4F60ED;
+constexpr ULONG_PTR propertyLinkVtable = 0xACD3B8;
 constexpr ULONG_PTR sharedListPaintReturn = 0x8117F5;
 constexpr ULONG_PTR dropdownPaintVtable = 0xA8A278;
 // Windows 11 DWMWA_CAPTION_COLOR and DWMWA_TEXT_COLOR, also buildable with older SDKs.
@@ -197,13 +198,27 @@ DWORD propertyFillColor(const CONTEXT& registers, DWORD bgr, const ThemeProfile&
     return bgr;
 }
 
+bool isPropertyLink(const CONTEXT& registers)
+{
+    // The graphics entry point saves the label receiver in its RDI slot.
+    const auto receiver = callerAt(registers, 0x560);
+    if (!receiver) return false;
+    __try {
+        return *reinterpret_cast<const ULONG_PTR*>(receiver) == frameBase + propertyLinkVtable;
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
+                EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        return false;
+    }
+}
+
 DWORD propertyLabelColor(const CONTEXT& registers, DWORD argb, const ThemeProfile& profile)
 {
-    // The underlined value is drawn by a separate window from the property grid.
+    // Static dialog labels share the renderer with links in the property palette.
     if ((argb == platformTextArgb || argb == platformMutedTextArgb) &&
         callerAt(registers, 0x578) == frameBase + 0x5BD070 &&
         callerAt(registers, 0x608) == frameBase + 0x5B9393 &&
-        callerAt(registers, 0xA78) == frameBase + 0x5B5C5D)
+        callerAt(registers, 0xA78) == frameBase + 0x5B5C5D &&
+        isPropertyLink(registers))
         return replaceRgb(argb, profile.colors[argb == platformTextArgb ? propertyText : propertyMutedText]);
 
     // The search renderer draws the matching and ordinary fragments separately.

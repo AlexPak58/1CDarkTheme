@@ -13,9 +13,9 @@ internal sealed record Preset(string Name, int Mask, string[] Colors);
 
 internal static class Palette
 {
-    public const int AllZones = 2047;
-    public const int ColorCount = 30;
-    private const int DefaultZones = 1791;
+    public const int AllZones = 4095;
+    public const int ColorCount = 31;
+    private const int DefaultZones = 3839;
     public const int MaxPresetName = 60;
     public const string DefaultName = "Тёмная";
     public const string GraphiteName = "Графитовая";
@@ -34,7 +34,8 @@ internal static class Palette
         new(128, "Вкладки под деревом", 19, ["Фон панели", "Текст", "Активная вкладка", "Неактивная вкладка"]),
         new(256, "Выпадающие списки (эксперимент)", 23, ["Фон", "Текст"]),
         new(512, "Выпадающие меню", 25, ["Фон", "Полоса значков", "Текст", "Горячие клавиши"]),
-        new(1024, "Свободная полоса за кнопками", 29, ["Фон"])
+        new(1024, "Свободная полоса за кнопками", 29, ["Фон"]),
+        new(2048, "Рамки верхнего меню и групп кнопок", 30, ["Цвет рамок"])
     ];
 
     private static readonly string[] Dark =
@@ -43,7 +44,7 @@ internal static class Palette
         "#1F2938", "#E5EBF5", "#A7B5C7", "#B9D4FF", "#305A8A", "#1F2938",
         "#1F2938", "#E5EBF5", "#A7B5C7", "#1F2938", "#E5EBF5", "#305A8A",
         "#2A374A", "#1F2938", "#E5EBF5", "#305A8A", "#2A374A", "#FFFFFF", "#000000",
-        "#1F2938", "#2A374A", "#E5EBF5", "#878B8F", "#1F2938"
+        "#1F2938", "#2A374A", "#E5EBF5", "#878B8F", "#1F2938", "#3B4A60"
     ];
 
     public static readonly Preset[] BuiltIns =
@@ -55,7 +56,7 @@ internal static class Palette
             "#262629", "#F3F0ED", "#BDB8B2", "#F3CF93", "#614742", "#262629",
             "#262629", "#F3F0ED", "#BDB8B2", "#262629", "#F3F0ED", "#614742",
             "#3A373B", "#262629", "#F3F0ED", "#614742", "#3A373B", "#FFFFFF", "#000000",
-            "#262629", "#3A373B", "#F3F0ED", "#8E8882", "#262629"
+            "#262629", "#3A373B", "#F3F0ED", "#8E8882", "#262629", "#464249"
         ]),
         new(NativeName, 0, Dark)
     ];
@@ -83,7 +84,7 @@ internal static class Palette
 
 internal sealed class PresetStore
 {
-    private const int CurrentVersion = 3;
+    private const int CurrentVersion = 4;
     private sealed record Document(int Version, Preset[] Presets);
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private string? _loadedHash;
@@ -107,6 +108,7 @@ internal sealed class PresetStore
         {
             1 => (511, 25),
             2 => (1023, 29),
+            3 => (2047, 30),
             _ => (Palette.AllZones, Palette.ColorCount)
         };
         var presets = new List<Preset>(imported.Presets.Length);

@@ -300,6 +300,12 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
                    callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
                    callerAt(regs, 0x148) == frameBase + 0x8E9D27) {
             regs.Rdx = toBgr(colors.colors[toolbarBandBackground]);
+        } else if ((theme & enableToolbarBorder) != 0 && (regs.EFlags & 0x40) == 0 &&
+                   regs.Rdx == barBackgroundBgr &&
+                   callerAt(regs, 0x98) == graphicsBase + 0xB89BF &&
+                   callerAt(regs, 0x1E8) == frameBase + 0x8BD1DD &&
+                   callerAt(regs, 0x2A8) == frameBase + 0x8BB658) {
+            regs.Rdx = toBgr(colors.colors[toolbarBorder]);
         } else if ((withBars || withStatusBar || withWindowTabs) && (regs.EFlags & 0x40) == 0 &&
                    regs.Rdx == barBackgroundBgr &&
                    callerAt(regs, 0x218) == frameBase + 0x71A6DF) {

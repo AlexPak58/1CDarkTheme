@@ -12,6 +12,7 @@ constexpr DWORD rgbMask = 0x00FFFFFF;
 constexpr DWORD white = rgbMask;
 constexpr DWORD backgroundRgb = 0x001F2938;
 constexpr DWORD backgroundBgr = 0x0038291F;
+constexpr DWORD workspaceBackgroundBgr = 0x00BDD3D7;
 constexpr DWORD textRgb = 0x0080F2C2;
 constexpr DWORD barBackgroundBgr = 0x00DDF2F5;
 constexpr DWORD platformTextArgb = 0xFF413003;
@@ -34,11 +35,12 @@ struct Site {
     DWORD protection;
 };
 
-enum SiteIndex { rowFill, emptyFill, labelColor };
+enum SiteIndex { rowFill, emptyFill, labelColor, workspaceFill };
 Site sites[] = {
     {nullptr, {0x44, 0x8B, 0xC6}, 0}, // mov r8d, esi
     {nullptr, {0x0F, 0x45, 0xD0}, 0}, // cmovne edx, eax
     {nullptr, {0x41, 0x8B, 0xC0}, 0}, // mov eax, r8d
+    {nullptr, {0x44, 0x8B, 0xC0}, 0}, // mov r8d, eax
 };
 
 ULONG_PTR frameBase;
@@ -238,6 +240,11 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         }
         regs.R8 = argb;
         regs.Rax = argb;
+    } else if (event.ExceptionAddress == sites[workspaceFill].address) {
+        // Only the empty workspace's standard fill. Preserve other platform colors.
+        const auto original = static_cast<DWORD>(regs.Rax);
+        regs.R8 = (theme & enableWorkspace) && original == workspaceBackgroundBgr ?
+            backgroundBgr : original;
     } else {
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -259,6 +266,7 @@ DWORD installSites()
     sites[rowFill].address = reinterpret_cast<BYTE*>(frameBase + 0x303454);
     sites[emptyFill].address = reinterpret_cast<BYTE*>(graphicsBase + 0xAEE4E);
     sites[labelColor].address = reinterpret_cast<BYTE*>(graphicsBase + 0x22D7);
+    sites[workspaceFill].address = reinterpret_cast<BYTE*>(frameBase + 0x9518EC);
     for (const auto& site : sites) {
         if (std::memcmp(site.address, site.instruction.data(), site.instruction.size()) != 0)
             return ERROR_INVALID_DATA;

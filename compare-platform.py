@@ -13,6 +13,11 @@ REFERENCE_HASHES = {
     "grphcs.dll": "125c00c01e7780704ad3e2159170dd7e1a05ef8cf9b2ed32b0b30cb535c4a563",
 }
 PROPERTY_PAINT_RETURN = 0x4F60ED
+DROPDOWN_DESCRIPTOR = 0xA8A7A0
+DROPDOWN_DISPATCH_PREFIX = bytes.fromhex(
+    "48 83 EC 48 48 8B 01 C7 44 24 30 64 00 00 00 "
+    "C7 44 24 28 02 00 00 00 C7 44 24 20 01 00 00 00 FF 90"
+)
 SITES = {
     "frame.dll": {
         "rowFill": 0x303454,
@@ -59,6 +64,7 @@ class Image:
             raise ValueError(f"{path}: expected an x64 PE32+ image")
         if optional_size < 128 or self.read("I", optional + 108) < 2:
             raise ValueError(f"{path}: missing PE import directory entry")
+        self.image_base = self.read("Q", optional + 24)
         self.import_rva, self.import_size = self.read("II", optional + 120)
         self.sections = {}
         for index in range(section_count):
@@ -125,6 +131,9 @@ def reference_windows(reference_dir):
         if module == "frame.dll":
             offset = PROPERTY_PAINT_RETURN - rva
             signatures[module]["property_paint"] = code[offset:offset + 24]
+            signatures[module]["dropdown_descriptors"] = dropdown_descriptors(image, DROPDOWN_DESCRIPTOR)
+            if signatures[module]["dropdown_descriptors"] is None:
+                raise ValueError(f"{image.path}: missing reference dropdown descriptors")
     return signatures
 
 
@@ -260,6 +269,69 @@ def property_palette_candidates(image, rva, code, anchor):
         }
 
 
+def dropdown_descriptors(image, rva):
+    start, size, offset = image.sections.get(b".rdata", (0, 0, 0))
+    if not start <= rva <= start + size - 7 * 24:
+        return None
+    entries = []
+    for index in range(7):
+        pointer, field, flag = image.read("QQQ", offset + rva - start + index * 24)
+        identifier = pointer - image.image_base
+        if not start <= identifier <= start + size - 16:
+            return None
+        begin = offset + identifier - start
+        entries.append((image.data[begin:begin + 16], field, flag))
+    return entries
+
+
+def dropdown_candidates(image, rva, code, descriptors):
+    start, size, offset = image.sections.get(b".rdata", (0, 0, 0))
+    rdata = image.data[offset:offset + size]
+    ranges = dict(image.function_ranges())
+    # A constructor writes the primary table to [rbx]; a reset writes it to [rcx].
+    constructors = {}
+    for match in re.finditer(rb"\x48\x8d\x05(.{4})\x48\x89\x03", code, re.S):
+        table = rva + match.start() + 7 + struct.unpack("<i", match[1])[0]
+        if start <= table < start + size:
+            constructors.setdefault(table, []).append(rva + match.start())
+
+    for match in re.finditer(rb"\x4d\x8b\xc8\x4c\x8b\xc2\x48\x8d\x15(.{4})\xe9(.{4})", code, re.S):
+        method = rva + match.start()
+        destination = match.end() + struct.unpack("<i", match[2])[0]
+        if not 0 <= destination < len(code):
+            continue
+        descriptor = method + 13 + struct.unpack("<i", match[1])[0]
+        if dropdown_descriptors(image, descriptor) != descriptors:
+            continue
+        pointer = struct.pack("<Q", image.image_base + method)
+        for reference in re.finditer(re.escape(pointer), rdata):
+            table = start + reference.start()
+            if table % 8 or table not in constructors:
+                continue
+            for slot, allocation in ((0x258, 0x88), (0x270, 0xC8)):
+                if reference.start() + slot + 8 > len(rdata):
+                    continue
+                renderer = image.read("Q", offset + reference.start() + slot) - image.image_base
+                prologue = bytes.fromhex("40 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 6C 24 F9 48 81 EC")
+                prologue += struct.pack("<I", allocation)
+                if renderer < rva or renderer not in ranges or not code.startswith(prologue, renderer - rva):
+                    continue
+                dispatch = DROPDOWN_DISPATCH_PREFIX + struct.pack("<I", slot)
+                returns = [f"0x{rva + call.end():X}" for call in re.finditer(re.escape(dispatch), code)
+                           if ranges.get(rva + call.start(), 0) > rva + call.end()]
+                if returns:
+                    yield {
+                        "descriptor_method": f"0x{method:X}",
+                        "descriptor_array": f"0x{descriptor:X}",
+                        "vtable": f"0x{table:X}",
+                        "constructor_references": [f"0x{site:X}" for site in constructors[table]],
+                        "paint_slot": f"0x{slot:X}",
+                        "paint_method": f"0x{renderer:X}",
+                        "stack_allocation": f"0x{allocation:X}",
+                        "dispatch_returns": returns,
+                    }
+
+
 def compare(directory, signatures):
     result = {"directory": str(directory), "clients": [], "modules": {}}
     for name in ("1cv8.exe", "1cv8c.exe"):
@@ -278,6 +350,8 @@ def compare(directory, signatures):
             summary["frame_color_candidates"] = frame_color_candidates(image, rva, code)
             summary["property_palette_candidates"] = list(property_palette_candidates(
                 image, rva, code, windows["property_paint"]))
+            summary["dropdown_candidates"] = list(dropdown_candidates(
+                image, rva, code, windows["dropdown_descriptors"]))
         elif name == "grphcs.dll":
             imports = {slot: symbol for dll, symbol, slot in image.imports()
                        if dll == "cairo.dll"

@@ -295,6 +295,11 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
             callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
             callerAt(regs, 0x148) == frameBase + 0xA4638) {
             regs.Rdx = listFill(regs, 0x268, white, theme, colors, true);
+        } else if ((theme & enableToolbarBand) != 0 && (regs.EFlags & 0x40) == 0 &&
+                   regs.Rdx == barBackgroundBgr &&
+                   callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
+                   callerAt(regs, 0x148) == frameBase + 0x8E9D27) {
+            regs.Rdx = toBgr(colors.colors[toolbarBandBackground]);
         } else if ((withBars || withStatusBar || withWindowTabs) && (regs.EFlags & 0x40) == 0 &&
                    regs.Rdx == barBackgroundBgr &&
                    callerAt(regs, 0x218) == frameBase + 0x71A6DF) {
@@ -499,7 +504,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetThemeProfile(LPVOID setting)
 {
     if (!setting) return ERROR_INVALID_PARAMETER;
     const auto& profile = *static_cast<const ThemeProfile*>(setting);
-    if (profile.size != sizeof(ThemeProfile) || profile.version != 2 || profile.zones > themeZoneMask)
+    if (profile.size != sizeof(ThemeProfile) || profile.version != themeProfileVersion ||
+        profile.zones > themeZoneMask)
         return ERROR_INVALID_PARAMETER;
     for (const auto color : profile.colors) {
         if (color > rgbMask) return ERROR_INVALID_PARAMETER;

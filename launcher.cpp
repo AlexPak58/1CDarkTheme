@@ -105,10 +105,12 @@ bool parseProfile(std::wstring_view input, ThemeProfile& profile)
     if (zones > themeZoneMask) return false;
     profile.zones = zones;
     input.remove_prefix(separator + 1);
-    const bool legacy = input.size() == legacyPaletteColorCount * 7 - 1;
-    if (legacy && zones > legacyProfileZoneMask) return false;
-    const size_t colorCount = legacy ? legacyPaletteColorCount : paletteColorCount;
-    if (input.size() != colorCount * 7 - 1) return false;
+    if ((input.size() + 1) % 7 != 0) return false;
+    const size_t colorCount = (input.size() + 1) / 7;
+    if (colorCount != paletteColorCount &&
+        !(colorCount == toolbarBandBackground && zones < enableToolbarBand) &&
+        !(colorCount == popupMenuBackground && zones < enablePopupMenu))
+        return false;
     for (size_t i = 0; i < colorCount; ++i) {
         char hex[6];
         for (size_t digit = 0; digit < sizeof(hex); ++digit) {
@@ -262,7 +264,7 @@ int wmain(int argc, wchar_t** argv)
     const bool profileMode = argc == 5 && std::wstring_view(argv[3]) == L"--palette";
     ThemeProfile profile;
     if (profileMode && !parseProfile(argv[4], profile)) {
-        std::fputs("Invalid palette. Expected a zone mask and 29 six-digit RGB colors (25 for legacy palettes).\n", stderr);
+        std::fputs("Invalid palette. Expected a zone mask and 30 six-digit RGB colors (25 or 29 for legacy palettes).\n", stderr);
         return 2;
     }
     ULONG_PTR selection{};

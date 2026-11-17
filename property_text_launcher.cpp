@@ -86,7 +86,8 @@ bool validDiagnostics(const PropertyTextProbeTrace& trace)
     auto reasonRemaining = diagnostic.reasons;
     remaining = trace.counts.rejectedStages[static_cast<size_t>(propertyDescription::Stage::WindowTables)];
     for (size_t bucket = 0; bucket < 2; ++bucket) {
-        if (diagnostic.used[bucket] > propertyTextDiagnosticReserve || diagnostic.drops[bucket] > remaining)
+        if (diagnostic.used[bucket] > propertyTextDiagnosticReserve || diagnostic.drops[bucket] > remaining ||
+            (diagnostic.drops[bucket] && diagnostic.used[bucket] != propertyTextDiagnosticReserve))
             return false;
         remaining -= diagnostic.drops[bucket];
         const auto start = bucket * propertyTextDiagnosticReserve;
@@ -100,6 +101,22 @@ bool validDiagnostics(const PropertyTextProbeTrace& trace)
                 group.key.windowTable.rva >= diagnostic.moduleSizes[module - 1]) return false;
             const bool target = group.key.windowTable == TableToken{Module::Text, propertyTextControl::windowTypeRva};
             if (target != (bucket == 1)) return false;
+            switch (group.key.reason) {
+            case Reason::WindowTable:
+                if (target) return false;
+                break;
+            case Reason::ReadInput:
+            case Reason::ReadWindow:
+                if (group.key.windowTable != TableToken{}) return false;
+                break;
+            case Reason::ReadContext:
+            case Reason::ReadAnchor:
+                // These reads precede the first W-table predicate.
+                break;
+            default:
+                if (!target) return false;
+                break;
+            }
             for (size_t j = 0; j < i; ++j)
                 if (diagnostic.groups[start + j].key == group.key) return false;
             remaining -= group.calls;

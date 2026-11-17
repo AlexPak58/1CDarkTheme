@@ -177,6 +177,59 @@ int wmain(int argc, wchar_t** argv)
         group.key.reason = Reason::ReadWindow;
         require(!validTrace(diagnosticTrace), "histogram and first reason disagree");
     }
+    {
+        using namespace propertyTextControl;
+        const auto singleRejection = [](Reason reason, TableToken token) {
+            PropertyTextProbeTrace reply;
+            reply.diagnostics.moduleSizes = {0x1000000, 0x1000000, 0x100000};
+            if (reason <= Reason::Back) reply.counts.mismatches = 1;
+            else reply.counts.readFailures = 1;
+            reply.counts.rejectedStages[static_cast<size_t>(Stage::WindowTables)] = 1;
+            reply.diagnostics.reasons[static_cast<size_t>(reason)] = 1;
+            const size_t bucket = token == TableToken{Module::Text, propertyTextControl::windowTypeRva} ? 1 : 0;
+            reply.diagnostics.used[bucket] = 1;
+            reply.diagnostics.groups[bucket * propertyTextDiagnosticReserve] = {{reason, token}, 1};
+            return reply;
+        };
+        const TableToken exact{Module::Text, propertyTextControl::windowTypeRva};
+        require(!validTrace(singleRejection(Reason::WindowTable, exact)), "exact W cannot fail W-table predicate");
+        require(!validTrace(singleRejection(Reason::ReadWindow, exact)), "failed W read cannot supply exact token");
+        require(!validTrace(singleRejection(Reason::ReadWindow, {Module::Frame, 1})), "failed W read cannot supply another image token");
+        require(!validTrace(singleRejection(Reason::ReadInput, exact)), "failed input cannot supply a W token");
+        require(validTrace(singleRejection(Reason::ReadInput, {})) &&
+                validTrace(singleRejection(Reason::ReadWindow, {})), "early read failures retain Other RVA0");
+        for (const auto reason : {Reason::ReadContext, Reason::ReadAnchor}) {
+            require(validTrace(singleRejection(reason, {})) &&
+                    validTrace(singleRejection(reason, {Module::Frame, 1})) &&
+                    validTrace(singleRejection(reason, exact)), "context and anchor reads precede table matching");
+        }
+        for (DWORD value = static_cast<DWORD>(Reason::ContextTable); value < static_cast<DWORD>(Reason::Count); ++value) {
+            const auto reason = static_cast<Reason>(value);
+            if (reason == Reason::ReadInput || reason == Reason::ReadWindow ||
+                reason == Reason::ReadContext || reason == Reason::ReadAnchor) continue;
+            require(!validTrace(singleRejection(reason, {})) &&
+                    !validTrace(singleRejection(reason, {Module::Frame, 1})) &&
+                    validTrace(singleRejection(reason, exact)), "every later predicate requires exact matched W token");
+        }
+        auto dropped = singleRejection(Reason::WindowTable, {});
+        dropped.diagnostics.used[0] = 0;
+        dropped.diagnostics.groups[0] = {};
+        dropped.diagnostics.drops[0] = 1;
+        require(!validTrace(dropped), "drop from empty bucket rejected");
+        dropped.diagnostics.used[0] = 1;
+        dropped.diagnostics.groups[0] = {{Reason::WindowTable, {}}, 1};
+        dropped.counts.mismatches = 2;
+        dropped.counts.rejectedStages[static_cast<size_t>(Stage::WindowTables)] = 2;
+        dropped.diagnostics.reasons[static_cast<size_t>(Reason::WindowTable)] = 2;
+        require(!validTrace(dropped), "drop from partially filled bucket rejected");
+        dropped.diagnostics.used[0] = static_cast<DWORD>(propertyTextDiagnosticReserve);
+        for (DWORD i = 0; i < propertyTextDiagnosticReserve; ++i)
+            dropped.diagnostics.groups[i] = {{Reason::WindowTable, {Module::Frame, i}}, 1};
+        dropped.counts.mismatches = propertyTextDiagnosticReserve + 1;
+        dropped.counts.rejectedStages[static_cast<size_t>(Stage::WindowTables)] = propertyTextDiagnosticReserve + 1;
+        dropped.diagnostics.reasons[static_cast<size_t>(Reason::WindowTable)] = propertyTextDiagnosticReserve + 1;
+        require(validTrace(dropped), "full other bucket legitimately drops a new key");
+    }
     trace.version=1; require(!validTrace(trace), "stale ABI1 rejected");
 
     std::vector<ProbeModule> modules;

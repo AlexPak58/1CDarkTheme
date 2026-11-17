@@ -3,6 +3,15 @@
 #include "tooltip_trace.hpp"
 #elif defined(THEME_FORM_LINE_TRACE)
 #include "form_line_trace.hpp"
+#elif defined(THEME_OUTLINE_TRACE)
+#include "outline_trace.hpp"
+#endif
+
+#if defined(THEME_FORM_LINE_TRACE) || defined(THEME_OUTLINE_TRACE)
+#define THEME_DOCUMENT_TRACE
+#endif
+#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_DOCUMENT_TRACE)
+#define THEME_CAIRO_TRACE
 #endif
 
 #include <tlhelp32.h>
@@ -103,9 +112,12 @@ constexpr char traceExport[] = "ReadTooltipTrace";
 #elif defined(THEME_FORM_LINE_TRACE)
 using TraceResult = FormLineTrace;
 constexpr char traceExport[] = "ReadFormLineTrace";
+#elif defined(THEME_OUTLINE_TRACE)
+using TraceResult = OutlineTrace;
+constexpr char traceExport[] = "ReadOutlineTrace";
 #endif
 
-#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE)
+#ifdef THEME_CAIRO_TRACE
 DWORD readTrace(HANDLE child, DWORD pid, const std::wstring& dll)
 {
     const auto base = remoteModule(pid, dll);
@@ -125,7 +137,15 @@ DWORD readTrace(HANDLE child, DWORD pid, const std::wstring& dll)
     VirtualFreeEx(child, output, 0, MEM_RELEASE);
     if (error) return error;
 
-#ifdef THEME_FORM_LINE_TRACE
+#ifdef THEME_OUTLINE_TRACE
+    std::puts("Spreadsheet outline samples (coordinates, colors and calls since previous read):");
+    for (const auto& sample : trace.outlines) {
+        if (sample.calls) std::printf("  %s moxelui+0x%lX (%ld, %ld, %ld, %ld) input=0x%08lX #%08lX %lu\n",
+            sample.mask ? "RGBA mask" : "RGB", sample.rendererReturn,
+            sample.rect.left, sample.rect.top, sample.rect.right, sample.rect.bottom,
+            sample.inputColor, sample.rgba, sample.calls);
+    }
+#elif defined(THEME_FORM_LINE_TRACE)
     std::puts("frmcore line samples (RGBA, logical coordinates, calls since previous read):");
     for (const auto& line : trace.lines) {
         if (line.calls) std::printf("  #%08lX (%ld, %ld) -> (%ld, %ld) %lu\n",
@@ -321,7 +341,14 @@ bool benchmark(HANDLE child, DWORD pid)
 
 int wmain(int argc, wchar_t** argv)
 {
-#ifdef THEME_FORM_LINE_TRACE
+#ifdef THEME_OUTLINE_TRACE
+    const bool designer = argc == 4 && std::wstring_view(argv[3]) == L"--designer";
+    if (designer) --argc;
+    if (argc != 3 || !serverRef(argv[2])) {
+        std::fputs("Usage: tree-theme-run.exe <1cv8c.exe or 1cv8.exe> <server\\ref> [--designer]\n", stderr);
+        return 2;
+    }
+#elif defined(THEME_FORM_LINE_TRACE)
     if (argc != 3 || !serverRef(argv[2])) {
         std::fputs("Usage: tree-theme-run.exe <1cv8c.exe or 1cv8.exe> <server\\ref>\n", stderr);
         return 2;
@@ -363,6 +390,9 @@ int wmain(int argc, wchar_t** argv)
 #elif defined(THEME_FORM_LINE_TRACE)
     if (!findFormLineTracePlatform(exe)) {
         std::fputs("Unsupported client hash for form-line-trace. See RESEARCH.md for supported builds.\n", stderr);
+#elif defined(THEME_OUTLINE_TRACE)
+    if (!findOutlineTracePlatform(exe, designer)) {
+        std::fputs("Unsupported client hash or mode for spreadsheet-outline-trace. See RESEARCH.md.\n", stderr);
 #else
     if (!matchesSha256(exe, exeHash)) {
         std::fputs("Unsupported 1cv8.exe (expected 8.3.27.2325 x64).\n", stderr);
@@ -376,16 +406,20 @@ int wmain(int argc, wchar_t** argv)
         return 2;
     }
 
-#ifdef THEME_FORM_LINE_TRACE
+#ifdef THEME_DOCUMENT_TRACE
     ULONG_PTR traceRva{};
     if (themeExportRva(dll, traceExport, traceRva)) {
-        std::fputs("The adjacent DLL is not a form-line-trace build.\n", stderr);
+        std::fprintf(stderr, "The adjacent DLL lacks the %s export.\n", traceExport);
         return 2;
     }
-    std::wstring command = L"\"" + exe + L"\" ENTERPRISE /S\"" + argv[2] + L"\" /WA+";
-#else
-    std::wstring command = L"\"" + exe + L"\" DESIGNER /S\"" + argv[2] + L"\" /WA+";
+    const wchar_t* mode = L" ENTERPRISE ";
+#ifdef THEME_OUTLINE_TRACE
+    if (designer) mode = L" DESIGNER ";
 #endif
+#else
+    const wchar_t* mode = L" DESIGNER ";
+#endif
+    std::wstring command = L"\"" + exe + L"\"" + mode + L"/S\"" + argv[2] + L"\" /WA+";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -397,8 +431,11 @@ int wmain(int argc, wchar_t** argv)
     const Handle child(process.hProcess);
     CloseHandle(process.hThread);
     if (profileMode) return applyLaunchProfile(child, process.dwProcessId, dll, profile);
-#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE)
-#ifdef THEME_FORM_LINE_TRACE
+#ifdef THEME_CAIRO_TRACE
+#ifdef THEME_OUTLINE_TRACE
+    std::printf("Started %s PID %lu. Open the spreadsheet first.\n",
+                designer ? "Configurator" : "Enterprise", process.dwProcessId);
+#elif defined(THEME_FORM_LINE_TRACE)
     std::printf("Started Enterprise PID %lu. Open the target form first.\n", process.dwProcessId);
 #else
     std::printf("Started Configurator PID %lu.\n", process.dwProcessId);
@@ -417,7 +454,7 @@ int wmain(int argc, wchar_t** argv)
     for (char input[32]; std::fgets(input, sizeof(input), stdin); ) {
         const char action = input[0];
         if (action == 'q') break;
-#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE)
+#ifdef THEME_CAIRO_TRACE
         if (action == 't') {
             const auto error = readTrace(child, process.dwProcessId, dll);
             if (error) std::fprintf(stderr, "Reading trace failed: %lu\n", error);
@@ -458,6 +495,8 @@ int wmain(int argc, wchar_t** argv)
         std::puts(action == 'e' ? "Tooltip trace enabled." : "Tooltip trace disabled.");
 #elif defined(THEME_FORM_LINE_TRACE)
         std::puts(action == 'e' ? "frmcore line trace enabled." : "frmcore line trace disabled.");
+#elif defined(THEME_OUTLINE_TRACE)
+        std::puts(action == 'e' ? "Spreadsheet outline trace enabled." : "Spreadsheet outline trace disabled.");
 #else
         std::puts(action == 'e' ? "Theme enabled. Repaint the tree." :
                                   "Theme disabled. Repaint the tree.");

@@ -66,12 +66,13 @@ inline constexpr FormLineTracePlatform formLineTracePlatforms[] = {
      0xE1C28, 0x29F7, 0x3F84, 0x83DA, 0x38FE7},
 };
 
-inline const FormLineTracePlatform* findFormLineTracePlatform(const std::wstring& executable)
+inline const FormLineTracePlatform* findFormLineTracePlatform(const std::wstring& executable,
+                                                             bool thickOnly = false)
 {
     Sha256Hex hash{};
     if (!readSha256(executable, hash)) return nullptr;
     for (const auto& platform : formLineTracePlatforms) {
-        if (!std::wcscmp(hash.data(), platform.thinClientHash) ||
+        if ((!thickOnly && !std::wcscmp(hash.data(), platform.thinClientHash)) ||
             (platform.thickClientHash && !std::wcscmp(hash.data(), platform.thickClientHash))) {
             return &platform;
         }

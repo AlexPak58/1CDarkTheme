@@ -70,7 +70,15 @@ public partial class MainWindow : Window
 
     private void RefreshPresets(string select)
     {
-        PresetBox.ItemsSource = Palette.BuiltIns.Concat(_custom).ToArray();
+        var customNames = _custom.Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var builtIns = Palette.BuiltIns.Select(p =>
+        {
+            var name = p.Name;
+            for (var suffix = 1; customNames.Contains(name); suffix++)
+                name = $"{p.Name} ({suffix})";
+            return p with { Name = name };
+        });
+        PresetBox.ItemsSource = builtIns.Concat(_custom).ToArray();
         PresetBox.SelectedItem = ((Preset[])PresetBox.ItemsSource).First(p => p.Name == select);
     }
 
@@ -280,7 +288,8 @@ public partial class MainWindow : Window
             var name = input.Text.Trim();
             if (!Palette.IsValidName(name))
                 message.Text = "Введите имя пресета.";
-            else if (Palette.BuiltIns.Any(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase)))
+            else if (Palette.BuiltIns.Any(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                     && !_custom.Any(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase)))
                 message.Text = "Это имя встроенного пресета. Выберите другое.";
             else
                 dialog.DialogResult = true;

@@ -4,6 +4,13 @@
 #elif defined(THEME_FORM_LINE_TRACE)
 #include "form_line_trace.hpp"
 #include <cstring>
+#elif defined(THEME_OUTLINE_TRACE)
+#include "outline_trace.hpp"
+#include <cstring>
+#endif
+
+#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE) || defined(THEME_OUTLINE_TRACE)
+#define THEME_CAIRO_TRACE
 #endif
 
 #include <intrin.h>
@@ -15,10 +22,12 @@ using SetSourceRgb = void (*)(void*, double, double, double);
 using SetSourceRgba = void (*)(void*, double, double, double, double);
 constexpr ULONG_PTR sourceRgbSlot = 0xC7B60;
 constexpr ULONG_PTR sourceRgbaSlot = 0xC7C20;
+#ifndef THEME_OUTLINE_TRACE
 constexpr ULONG_PTR solidFillReturn = 0xAEE56;
 constexpr ULONG_PTR treeRowsReturn = 0x303466;
 constexpr ULONG_PTR listPaintReturn = 0x8117F5;
 constexpr ULONG_PTR treePaintVtable = 0xA88AC0;
+#endif
 
 struct ImportHook {
     ULONG_PTR offset;
@@ -37,21 +46,25 @@ ImportHook hooks[] = {
 };
 #if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE)
 constexpr size_t firstHook = 1;
-constexpr size_t hookCount = std::size(hooks);
-SRWLOCK traceLock = SRWLOCK_INIT;
-#ifdef THEME_TOOLTIP_TRACE
-TooltipTrace trace;
-const TooltipTracePlatform* tracePlatform;
-#else
-FormLineTrace trace;
-const FormLineTracePlatform* tracePlatform;
-#endif
 #else
 constexpr size_t firstHook = 0;
+#endif
 #ifdef THEME_BACKGROUND_ONLY
 constexpr size_t hookCount = 1;
 #else
 constexpr size_t hookCount = std::size(hooks);
+#endif
+#ifdef THEME_CAIRO_TRACE
+SRWLOCK traceLock = SRWLOCK_INIT;
+#ifdef THEME_TOOLTIP_TRACE
+TooltipTrace trace;
+const TooltipTracePlatform* tracePlatform;
+#elif defined(THEME_FORM_LINE_TRACE)
+FormLineTrace trace;
+const FormLineTracePlatform* tracePlatform;
+#else
+OutlineTrace trace;
+const OutlineTracePlatform* tracePlatform;
 #endif
 #endif
 ULONG_PTR frameBase;
@@ -59,6 +72,7 @@ ULONG_PTR graphicsBase;
 SRWLOCK controlLock = SRWLOCK_INIT;
 std::atomic<bool> enabled;
 
+#ifndef THEME_OUTLINE_TRACE
 bool isTreeReceiver(const ULONG_PTR* stack, size_t paintOffset)
 {
     if (stack[paintOffset / sizeof(*stack)] != frameBase + listPaintReturn) return false;
@@ -86,8 +100,9 @@ bool isTreeFill(const ULONG_PTR* stack)
            stack[0x220 / sizeof(*stack)] == frameBase + treeRowsReturn &&
            isTreeReceiver(stack, 0x600);
 }
+#endif
 
-#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE)
+#ifdef THEME_CAIRO_TRACE
 bool packRgba(double red, double green, double blue, double alpha, DWORD& rgba)
 {
     const auto isChannel = [](double value) { return value >= 0 && value <= 1; };
@@ -160,10 +175,63 @@ void recordFormLine(const ULONG_PTR* stack, double red, double green, double blu
     if (*count != MAXDWORD) ++*count;
     ReleaseSRWLockExclusive(&traceLock);
 }
+#elif defined(THEME_OUTLINE_TRACE)
+void recordOutline(const ULONG_PTR* stack, bool mask, double red, double green,
+                   double blue, double alpha)
+{
+    const auto& profile = *tracePlatform;
+    const auto expected = mask ? profile.rgbaReturn : profile.graphicsReturns.front();
+    if (stack[0] != graphicsBase + expected) return;
+
+    constexpr size_t inputColorOffset = 0xF8;
+    const size_t converterFrame = mask ? 0x40 : 0;
+    const size_t rendererOffset = profile.rendererStackOffset + converterFrame;
+    const auto stackTop = reinterpret_cast<ULONG_PTR>(
+        reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
+    const auto address = reinterpret_cast<ULONG_PTR>(stack);
+    if (address > stackTop || stackTop - address < rendererOffset + inputColorOffset + sizeof(DWORD))
+        return;
+
+    constexpr size_t graphicsOffsets[] = {0, 0x40, 0x90, 0x140};
+    for (size_t i = 0; i < std::size(graphicsOffsets); ++i) {
+        const auto offset = (converterFrame + graphicsOffsets[i]) / sizeof(*stack);
+        if (stack[offset] != graphicsBase + profile.graphicsReturns[i]) return;
+    }
+    const auto rendererReturn = stack[rendererOffset / sizeof(*stack)] - frameBase;
+    if (rendererReturn != profile.rendererReturns[0] && rendererReturn != profile.rendererReturns[1])
+        return;
+
+    OutlineTraceSample sample{};
+    if (!packRgba(red, green, blue, alpha, sample.rgba)) return;
+    sample.mask = mask;
+    sample.rendererReturn = static_cast<DWORD>(rendererReturn);
+    const auto* rendererStack = reinterpret_cast<const BYTE*>(stack) + rendererOffset;
+    std::memcpy(&sample.rect, rendererStack + 0x58, sizeof(sample.rect));
+    std::memcpy(&sample.inputColor, rendererStack + inputColorOffset, sizeof(sample.inputColor));
+
+    AcquireSRWLockExclusive(&traceLock);
+    DWORD* count = &trace.otherCalls;
+    for (auto& outline : trace.outlines) {
+        if (outline.calls && (outline.mask != sample.mask || outline.rgba != sample.rgba ||
+            outline.rendererReturn != sample.rendererReturn || outline.inputColor != sample.inputColor ||
+            !EqualRect(&outline.rect, &sample.rect))) continue;
+        if (!outline.calls) outline = sample;
+        count = &outline.calls;
+        break;
+    }
+    if (*count != MAXDWORD) ++*count;
+    ReleaseSRWLockExclusive(&traceLock);
+}
 #endif
 
 void setSourceRgb(void* context, double red, double green, double blue)
 {
+#ifdef THEME_OUTLINE_TRACE
+    if (enabled.load(std::memory_order_relaxed)) {
+        recordOutline(static_cast<const ULONG_PTR*>(_AddressOfReturnAddress()), false,
+                      red, green, blue, 1.0);
+    }
+#else
     // The verified grphcs function ends in a tail jump through this IAT slot.
     if (reinterpret_cast<ULONG_PTR>(_ReturnAddress()) == graphicsBase + solidFillReturn &&
         red == 1.0 && green == 1.0 && blue == 1.0 &&
@@ -173,11 +241,18 @@ void setSourceRgb(void* context, double red, double green, double blue)
         green = 0x29 / 255.0;
         blue = 0x38 / 255.0;
     }
+#endif
     reinterpret_cast<SetSourceRgb>(hooks[0].original)(context, red, green, blue);
 }
 
 void setSourceRgba(void* context, double red, double green, double blue, double alpha)
 {
+#ifdef THEME_OUTLINE_TRACE
+    if (enabled.load(std::memory_order_relaxed)) {
+        recordOutline(static_cast<const ULONG_PTR*>(_AddressOfReturnAddress()), true,
+                      red, green, blue, alpha);
+    }
+#else
 #ifdef THEME_TOOLTIP_TRACE
     const auto expectedReturn = tracePlatform->graphics.rgbaReturn;
 #elif defined(THEME_FORM_LINE_TRACE)
@@ -214,6 +289,7 @@ void setSourceRgba(void* context, double red, double green, double blue, double 
         }
 #endif
     }
+#endif
     reinterpret_cast<SetSourceRgba>(hooks[1].original)(context, red, green, blue, alpha);
 }
 
@@ -221,6 +297,8 @@ DWORD resolveHooks()
 {
 #ifdef THEME_FORM_LINE_TRACE
     const auto frame = GetModuleHandleW(L"frmcore.dll");
+#elif defined(THEME_OUTLINE_TRACE)
+    const auto frame = GetModuleHandleW(L"moxelui.dll");
 #else
     const auto frame = GetModuleHandleW(L"frame.dll");
 #endif
@@ -241,6 +319,14 @@ DWORD resolveHooks()
         !matchesSha256(modulePath(graphics), platform->graphicsHash)) return ERROR_REVISION_MISMATCH;
     tracePlatform = platform;
     hooks[firstHook].offset = platform->rgbaSlot;
+#elif defined(THEME_OUTLINE_TRACE)
+    if (IsDebuggerPresent()) return ERROR_REVISION_MISMATCH;
+    const auto* platform = findOutlineTracePlatform(modulePath(nullptr));
+    if (!platform || !matchesSha256(modulePath(frame), platform->rendererHash) ||
+        !matchesSha256(modulePath(graphics), platform->client.graphicsHash)) return ERROR_REVISION_MISMATCH;
+    tracePlatform = platform;
+    hooks[0].offset = platform->rgbSlot;
+    hooks[1].offset = platform->client.rgbaSlot;
 #else
     if (IsDebuggerPresent() || !matchesSha256(modulePath(nullptr), exeHash) ||
         !matchesSha256(modulePath(frame), frameHash) ||
@@ -302,8 +388,10 @@ DWORD setHook(bool on)
 extern "C" __declspec(dllexport) DWORD WINAPI ReadTooltipTrace(LPVOID output)
 #elif defined(THEME_FORM_LINE_TRACE)
 extern "C" __declspec(dllexport) DWORD WINAPI ReadFormLineTrace(LPVOID output)
+#elif defined(THEME_OUTLINE_TRACE)
+extern "C" __declspec(dllexport) DWORD WINAPI ReadOutlineTrace(LPVOID output)
 #endif
-#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE)
+#ifdef THEME_CAIRO_TRACE
 {
     if (!output) return ERROR_INVALID_PARAMETER;
     AcquireSRWLockExclusive(&traceLock);

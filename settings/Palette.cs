@@ -19,6 +19,7 @@ internal static class Palette
     public const int MaxPresetName = 60;
     public const string DefaultName = "Тёмная";
     public const string GraphiteName = "Графитовая";
+    public const string PinkName = "Нежно-розовая";
     public const string NativeName = "Штатные цвета";
 
     // Bits and color offsets match ThemeProfile and PaletteColor in platform.hpp.
@@ -57,6 +58,14 @@ internal static class Palette
             "#262629", "#F3F0ED", "#BDB8B2", "#262629", "#F3F0ED", "#614742",
             "#3A373B", "#262629", "#F3F0ED", "#614742", "#3A373B", "#FFFFFF", "#000000",
             "#262629", "#3A373B", "#F3F0ED", "#8E8882", "#262629", "#464249"
+        ]),
+        new(PinkName, DefaultZones,
+        [
+            "#FFF4F7", "#523044", "#F8E1E9", "#3C2433", "#F9E7EE", "#3C2433",
+            "#FFF4F7", "#3C2433", "#663B4F", "#70324F", "#E9AAC5", "#F7E9EF",
+            "#F9E7EE", "#3C2433", "#663B4F", "#F9E7EE", "#3C2433", "#E9AAC5",
+            "#F6DCE7", "#F9E7EE", "#3C2433", "#E9AAC5", "#F6DCE7", "#FFFFFF", "#000000",
+            "#FFF4F7", "#F6DCE7", "#3C2433", "#663B4F", "#F9E7EE", "#B47C96"
         ]),
         new(NativeName, 0, Dark)
     ];
@@ -112,7 +121,9 @@ internal sealed class PresetStore
             _ => (Palette.AllZones, Palette.ColorCount)
         };
         var presets = new List<Preset>(imported.Presets.Length);
-        var names = new HashSet<string>(Palette.BuiltIns.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+        // Older files could already have a custom preset with the new built-in name.
+        var names = new HashSet<string>(Palette.BuiltIns.Where(p => p.Name != Palette.PinkName).Select(p => p.Name),
+                                        StringComparer.OrdinalIgnoreCase);
         foreach (var preset in imported.Presets)
         {
             if (preset is null || !Palette.IsValidName(preset.Name) || !names.Add(preset.Name)

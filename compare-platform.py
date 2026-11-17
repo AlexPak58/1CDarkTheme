@@ -440,6 +440,50 @@ def search_label_factories(image, rva, code):
             yield factory, tables, tuple(sizes)
 
 
+def search_grid_window_colors(image, rva, code, ranges, imports, vtable):
+    primary_setters = {
+        "?setPrimaryBkColor@Window@wbase@@QEAAXK@Z": "background_call",
+        "?setPrimaryTextColor@Window@wbase@@QEAAXK@Z": "text_call",
+    }
+    palette_setters = {
+        "?prepare_window_colors@wbase@@YAXPEAKPEAVIPresentationService@core@@PEAVIV8Style@3@H@Z":
+            "prepare_call",
+        "?setWindowColors@Window@wbase@@QEAAXPEBKH@Z": "apply_call",
+    }
+    ro_rva, ro_size, ro_offset = image.sections[b".rdata"]
+    for slot, symbols in ((0x100, primary_setters), (0x108, palette_setters)):
+        entry = vtable + slot
+        if not ro_rva <= entry <= ro_rva + ro_size - 8:
+            continue
+        method = image.read("Q", ro_offset + entry - ro_rva) - image.image_base
+        end = ranges.get(method, 0)
+        if not rva <= method < end <= rva + len(code):
+            continue
+        updater = method
+        if slot == 0x108:
+            delegate = re.search(rb"\x48\x8b\xf9\xe8(.{4})", code[method - rva:end - rva], re.S)
+            if delegate is None:
+                continue
+            updater = method + delegate.end() + struct.unpack("<i", delegate[1])[0]
+            end = ranges.get(updater, 0)
+            if not rva <= updater < end <= rva + len(code):
+                continue
+        calls = {}
+        for call in re.finditer(rb"\xff\x15(.{4})", code[updater - rva:end - rva], re.S):
+            target = updater + call.end() + struct.unpack("<i", call[1])[0]
+            key = symbols.get(imports.get(target))
+            if key:
+                calls.setdefault(key, []).append(updater + call.start())
+        if set(calls) == set(symbols.values()) and all(len(sites) == 1 for sites in calls.values()):
+            return {
+                "method_slot": f"0x{slot:X}",
+                "method": f"0x{method:X}",
+                "updater": f"0x{updater:X}",
+                **{key: f"0x{sites[0]:X}" for key, sites in calls.items()},
+            }
+    return None
+
+
 def search_grid_candidates(image, rva, code):
     ranges = dict(image.function_ranges())
     imports = {slot: symbol for _, symbol, slot in image.imports()}
@@ -502,6 +546,8 @@ def search_grid_candidates(image, rva, code):
                             "method_slot": f"0x{method_slot:X}",
                             "resolver_slot": f"0x{struct.unpack('<I', resolve[2])[0]:X}",
                             "field_load": f"0x{rva + resolve.start(3) - 3:X}",
+                            "window_colors": search_grid_window_colors(
+                                image, rva, code, ranges, imports, vtable),
                         }
 
 

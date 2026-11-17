@@ -20,6 +20,7 @@ struct ProbeSite {
     BYTE* address{};
     bool patched{};
     bool needsFlush{};
+    bool needsProtectionRestore{};
     DWORD originalProtection{};
 };
 
@@ -59,6 +60,8 @@ std::atomic<DWORD> resultsBackgrounds{};
 std::atomic<DWORD> otherBackgrounds{};
 std::atomic<DWORD> replacedCairoFills{};
 std::atomic<DWORD> replacedRowFills{};
+std::atomic<DWORD> replacedTextBackgrounds{};
+std::atomic<DWORD> replacedTexts{};
 
 struct GridCandidate {
     ULONG_PTR address;
@@ -70,19 +73,43 @@ thread_local GridCandidate lastCandidate{};
 
 bool matchesCandidate(ULONG_PTR control)
 {
-    return control && control == lastCandidate.address &&
-        lastCandidate.generation == traceGeneration.load(std::memory_order_relaxed) &&
-        *reinterpret_cast<const ULONG_PTR*>(control) == lastCandidate.vtable;
+    if (!control || control != lastCandidate.address ||
+        lastCandidate.generation != traceGeneration.load(std::memory_order_relaxed)) return false;
+    __try {
+        return *reinterpret_cast<const ULONG_PTR*>(control) == lastCandidate.vtable;
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
+                EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        return false;
+    }
 }
 
 #ifdef THEME_SEARCH_RESULTS_COLOR_TEST
 using SetSourceRgb = void (*)(void*, double, double, double);
-PVOID* cairoRgbSlot{};
-PVOID originalCairoRgb{};
+using SetSourceRgba = void (*)(void*, double, double, double, double);
+void setSearchSourceRgb(void*, double, double, double);
+void setSearchSourceRgba(void*, double, double, double, double);
+struct CairoHook {
+    ULONG_PTR offset;
+    const char* name;
+    PVOID replacement;
+    PVOID* slot{};
+    PVOID original{};
+    bool patched{};
+};
+std::array cairoHooks{
+    CairoHook{0xC7B60, "cairo_set_source_rgb", reinterpret_cast<PVOID>(&setSearchSourceRgb)},
+    CairoHook{0xC7C20, "cairo_set_source_rgba", reinterpret_cast<PVOID>(&setSearchSourceRgba)},
+};
 ULONG_PTR paintFrameBase{};
 ULONG_PTR graphicsBase{};
-DWORD cairoSlotProtection{};
-bool cairoPatched{};
+DWORD cairoPageProtection{};
+
+bool isSearchReceiver(const ULONG_PTR* stack, size_t paintOffset)
+{
+    if (stack[paintOffset / 8] != paintFrameBase + 0x8117F5) return false;
+    const auto window = stack[(paintOffset - 0x20) / 8];
+    return window > 0x100 && matchesCandidate(window - 0x100);
+}
 
 bool isSearchBackground(const ULONG_PTR* stack)
 {
@@ -103,10 +130,8 @@ bool isSearchRow(const ULONG_PTR* stack)
         reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
     const auto address = reinterpret_cast<ULONG_PTR>(stack);
     if (address > top || top - address < 0x608 ||
-        stack[0x220 / 8] != paintFrameBase + 0x303466 ||
-        stack[0x600 / 8] != paintFrameBase + 0x8117F5) return false;
-    const auto window = stack[0x5E0 / 8];
-    return window > 0x100 && matchesCandidate(window - 0x100);
+        stack[0x220 / 8] != paintFrameBase + 0x303466) return false;
+    return isSearchReceiver(stack, 0x600);
 }
 
 void setSearchSourceRgb(void* context, double red, double green, double blue)
@@ -116,39 +141,70 @@ void setSearchSourceRgb(void* context, double red, double green, double blue)
         collecting.load(std::memory_order_acquire)) {
         const auto* stack = static_cast<const ULONG_PTR*>(_AddressOfReturnAddress());
         if (isSearchBackground(stack)) {
-            red = 0xBD / 255.0;
-            green = 0xD5 / 255.0;
-            blue = 0xEA / 255.0;
+            red = 0x1F / 255.0;
+            green = 0x29 / 255.0;
+            blue = 0x38 / 255.0;
             replacedCairoFills.fetch_add(1, std::memory_order_relaxed);
         } else if (isSearchRow(stack)) {
-            red = 0xDC / 255.0;
-            green = 0xED / 255.0;
-            blue = 0xCC / 255.0;
+            red = 0x1F / 255.0;
+            green = 0x29 / 255.0;
+            blue = 0x38 / 255.0;
             replacedRowFills.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    reinterpret_cast<SetSourceRgb>(originalCairoRgb)(context, red, green, blue);
+    reinterpret_cast<SetSourceRgb>(cairoHooks[0].original)(context, red, green, blue);
+}
+
+void setSearchSourceRgba(void* context, double red, double green, double blue, double alpha)
+{
+    if (reinterpret_cast<ULONG_PTR>(_ReturnAddress()) == graphicsBase + 0x2336 &&
+        collecting.load(std::memory_order_acquire)) {
+        const auto* stack = static_cast<const ULONG_PTR*>(_AddressOfReturnAddress());
+        const auto top = reinterpret_cast<ULONG_PTR>(
+            reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
+        const auto address = reinterpret_cast<ULONG_PTR>(stack);
+        const auto remaining = address <= top ? top - address : 0;
+        if (remaining >= 0xCC8 && stack[0x40 / 8] == graphicsBase + 0x7905B &&
+            red == 1.0 && green == 1.0 && blue == 1.0 &&
+            stack[0x4C0 / 8] == paintFrameBase + 0x85F475 && isSearchReceiver(stack, 0xCC0)) {
+            red = 0x1F / 255.0;
+            green = 0x29 / 255.0;
+            blue = 0x38 / 255.0;
+            replacedTextBackgrounds.fetch_add(1, std::memory_order_relaxed);
+        } else if (remaining >= 0xD88 && stack[0x40 / 8] == graphicsBase + 0x79821 &&
+                   red == 0.0 && green == 0.0 && blue == 0.0 &&
+                   stack[0x580 / 8] == paintFrameBase + 0x85F475 && isSearchReceiver(stack, 0xD80)) {
+            red = 0xE5 / 255.0;
+            green = 0xEB / 255.0;
+            blue = 0xF5 / 255.0;
+            replacedTexts.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    reinterpret_cast<SetSourceRgba>(cairoHooks[1].original)(context, red, green, blue, alpha);
 }
 
 DWORD patchCairo(bool enable)
 {
     DWORD error{};
-    if (cairoPatched != enable) {
-        if (!cairoSlotProtection &&
-            !VirtualProtect(cairoRgbSlot, sizeof(PVOID), PAGE_READWRITE, &cairoSlotProtection))
+    // Both slots occupy one page. Keep one protection snapshot across rollback/retry.
+    auto* address = cairoHooks.front().slot;
+    const auto size = cairoHooks.back().offset - cairoHooks.front().offset + sizeof(PVOID);
+    for (auto& hook : cairoHooks) {
+        if (hook.patched == enable) continue;
+        if (!cairoPageProtection &&
+            !VirtualProtect(address, size, PAGE_READWRITE, &cairoPageProtection))
             return GetLastError();
-        const auto hook = reinterpret_cast<PVOID>(&setSearchSourceRgb);
-        const auto from = enable ? originalCairoRgb : hook;
-        const auto to = enable ? hook : originalCairoRgb;
-        if (InterlockedCompareExchangePointer(cairoRgbSlot, to, from) == from)
-            cairoPatched = enable;
+        const auto from = enable ? hook.original : hook.replacement;
+        const auto to = enable ? hook.replacement : hook.original;
+        if (InterlockedCompareExchangePointer(hook.slot, to, from) == from)
+            hook.patched = enable;
         else
             error = ERROR_INVALID_DATA;
     }
-    if (cairoSlotProtection) {
+    if (cairoPageProtection) {
         DWORD ignored{};
-        if (VirtualProtect(cairoRgbSlot, sizeof(PVOID), cairoSlotProtection, &ignored))
-            cairoSlotProtection = 0;
+        if (VirtualProtect(address, size, cairoPageProtection, &ignored))
+            cairoPageProtection = 0;
         else if (!error)
             error = GetLastError();
     }
@@ -280,6 +336,11 @@ DWORD prepare()
         site->address = reinterpret_cast<BYTE*>(frameBase + site->rva);
         if (std::memcmp(site->address, site->signature.data(), site->signature.size()))
             return ERROR_INVALID_DATA;
+        // Snapshot each page before any patch can leave a shared page writable.
+        MEMORY_BASIC_INFORMATION page{};
+        if (!VirtualQuery(site->address, &page, sizeof(page))) return GetLastError();
+        if (page.State != MEM_COMMIT || !page.Protect) return ERROR_INVALID_ADDRESS;
+        site->originalProtection = page.Protect;
     }
 
     HMODULE pinned{};
@@ -289,14 +350,16 @@ DWORD prepare()
     const auto cairo = GetModuleHandleW(L"cairo.dll");
     if (!graphics || !cairo) return ERROR_MOD_NOT_FOUND;
     if (!matchesSha256(modulePath(graphics), graphicsHash)) return ERROR_REVISION_MISMATCH;
-    originalCairoRgb = reinterpret_cast<PVOID>(GetProcAddress(cairo, "cairo_set_source_rgb"));
-    if (!originalCairoRgb) return ERROR_PROC_NOT_FOUND;
+    for (auto& hook : cairoHooks) {
+        hook.original = reinterpret_cast<PVOID>(GetProcAddress(cairo, hook.name));
+        if (!hook.original) return ERROR_PROC_NOT_FOUND;
+        hook.slot = reinterpret_cast<PVOID*>(reinterpret_cast<ULONG_PTR>(graphics) + hook.offset);
+    }
     if (!GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(graphics), &pinned) ||
         !GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(cairo), &pinned))
         return GetLastError();
     paintFrameBase = frameBase;
     graphicsBase = reinterpret_cast<ULONG_PTR>(graphics);
-    cairoRgbSlot = reinterpret_cast<PVOID*>(graphicsBase + 0xC7B60);
 #endif
     if (!GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(frame), &pinned) ||
         !GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(frontend), &pinned) ||
@@ -315,9 +378,10 @@ DWORD patch(ProbeSite& site, bool enable)
 {
     DWORD error{};
     if (site.patched != enable) {
-        if (!site.originalProtection &&
-            !VirtualProtect(site.address, 1, PAGE_EXECUTE_READWRITE, &site.originalProtection))
-            return GetLastError();
+        DWORD ignored{};
+        // Another site on this page may have restored protection since our last attempt.
+        if (!VirtualProtect(site.address, 1, PAGE_EXECUTE_READWRITE, &ignored)) return GetLastError();
+        site.needsProtectionRestore = true;
         auto* opcode = reinterpret_cast<volatile char*>(site.address);
         const auto original = static_cast<char>(site.signature.front());
         const auto from = enable ? original : breakpoint;
@@ -335,10 +399,10 @@ DWORD patch(ProbeSite& site, bool enable)
         else if (!error)
             error = GetLastError();
     }
-    if (site.originalProtection) {
+    if (site.needsProtectionRestore) {
         DWORD ignored{};
         if (VirtualProtect(site.address, 1, site.originalProtection, &ignored))
-            site.originalProtection = 0;
+            site.needsProtectionRestore = false;
         else if (!error)
             error = GetLastError();
     }
@@ -403,7 +467,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(void* setting)
     return error;
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV5(void* output)
+extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV6(void* output)
 {
     if (!output) return ERROR_INVALID_PARAMETER;
     SearchResultsTrace trace{
@@ -421,6 +485,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV5(void* out
         otherBackgrounds.exchange(0, std::memory_order_relaxed),
         replacedCairoFills.exchange(0, std::memory_order_relaxed),
         replacedRowFills.exchange(0, std::memory_order_relaxed),
+        replacedTextBackgrounds.exchange(0, std::memory_order_relaxed),
+        replacedTexts.exchange(0, std::memory_order_relaxed),
     };
     for (size_t i = 0; i < whiteWrites.size(); ++i)
         trace.whiteWrites[i] = whiteWrites[i].exchange(0, std::memory_order_relaxed);

@@ -65,6 +65,14 @@ struct ImageFixtureReader : GuardedReader {
             value = fakeFrame + 0x7C1670;
             return true;
         }
+        if (base == fakeFrame + propertyPaint::proxySiteTypeRva && offset == 0x18) {
+            value = fakeFrame + 0x8A7A80;
+            return true;
+        }
+        if (base == fakeFrame + propertyPaint::proxyIdTypeRva && offset == 0x18) {
+            value = fakeFrame + 0x8A7AA0;
+            return true;
+        }
         return GuardedReader::read(base, offset, value);
     }
 
@@ -77,7 +85,7 @@ struct ImageFixtureReader : GuardedReader {
 
 struct Objects {
     alignas(8) BYTE window[0x3C8]{}, owner[0x978]{}, site[0x138]{}, form[0x4A8]{},
-        shellBlock[0x90]{}, manager[0x40]{};
+        shellBlock[0x90]{}, manager[0x40]{}, head[0x30]{}, node[0x30]{}, proxy[0x238]{};
     ULONG_PTR draw{address(window, 0x160)};
     ULONG_PTR shell{address(shellBlock, 0x18)};
 
@@ -98,6 +106,12 @@ struct Objects {
         put(site, 0x18, fakeFrame + idTypeRva);
         setId(10);
         put(form, 0, fakeFrame + formTypeRva);
+        put(form, 8, address(head));
+        put(head, 8, address(node));
+        put(head, 0x19, BYTE{1});
+        put(node, 0, address(head));
+        put(node, 0x10, address(head));
+        put(node, 0x28, address(site) - 8);
         put(form, 0x28, fakeFrame + formViewTypeRva);
         put(form, 0x4A0, shell + 0x10);
         put(shellBlock, 0x18, fakeFrame + shellTypeRva);
@@ -112,7 +126,24 @@ struct Objects {
         setManager(0, 0);
     }
 
-    void setId(DWORD value) { put(site, 0x18 + 0x114, value); }
+    void setId(DWORD value) {
+        put(site, 0x18 + 0x114, value);
+        put(node, 0x20, value);
+    }
+
+    void attachProxy() {
+        put(owner, 0x2A0, fakeFrame + propertyPaint::ownerNativeTypeRva);
+        put(owner, 0x2A8, address(proxy));
+        put(owner, 0x528, address(proxy, 8));
+        put(proxy, 0, fakeFrame + propertyPaint::proxySiteTypeRva);
+        put(proxy, 8, fakeFrame + propertyPaint::proxyIdTypeRva);
+        put(proxy, 0x40, fakeFrame + propertyPaint::proxyHostTypeRva);
+        put(proxy, 0x1C0, address(owner, 0x2A0));
+        put(proxy, 0x1D0, address(owner, 0x2E0));
+        put(proxy, 0x228, address(site));
+        put(proxy, 0x230, address(site, 0x18));
+        put(site, 0x10, address(proxy, 0x40));
+    }
 
     void setManager(size_t root, size_t view)
     {
@@ -288,6 +319,109 @@ void testSiteDiagnostics()
         "accepted identity does not carry a previous rejection observation");
 }
 
+void testProxyAndRegistry()
+{
+    Objects objects;
+    objects.attachProxy();
+    Identity id{};
+    bool brush{};
+    Stage stage{};
+    propertyPaint::SiteObservation observed{};
+    const auto inspect = [&] {
+        return propertyPaint::inspectPaint(fakeFrame, address(objects.window), address(objects.owner, 0x5C8),
+            id, brush, ImageFixtureReader{}, &stage, &observed);
+    };
+    for (DWORD controlId : {8u, 10u}) {
+        objects.setId(controlId);
+        for (size_t pair = 0; pair < managerTypes.size(); ++pair) {
+            objects.setManager(pair, pair);
+            require(inspect() == Outcome::Accepted && id.controlId == controlId &&
+                id.kind == (controlId == 10 ? Kind::Description : Kind::List) &&
+                observed == propertyPaint::SiteObservation{}, "registered proxy control with exact family");
+        }
+    }
+    objects.setManager(0, 0);
+    put(objects.proxy, 0x228, ULONG_PTR{});
+    put(objects.proxy, 0x1B8, DWORD{10});
+    require(inspect() == Outcome::ReadFailure && stage == Stage::Site,
+        "detached proxy cannot use fallback local ID");
+    objects.attachProxy();
+    put(objects.proxy, 0x230, ULONG_PTR{});
+    require(inspect() == Outcome::ReadFailure, "missing delegated ID rejected");
+    objects.attachProxy();
+    for (size_t offset : {size_t{0x1C0}, size_t{0x1D0}}) {
+        put(objects.proxy, offset, address(objects.owner, 0x2E8));
+        require(inspect() == Outcome::Mismatch && stage == Stage::Site &&
+            observed.siteTableRva == propertyPaint::proxySiteTypeRva &&
+            observed.idTableRva == propertyPaint::proxyIdTypeRva && !observed.linked18,
+            "proxy rejection retains original bounded diagnostic");
+        objects.attachProxy();
+    }
+    put(objects.site, 0x10, address(objects.proxy, 0x48));
+    require(inspect() == Outcome::Mismatch, "wrapper must point back to exact proxy host");
+    objects.attachProxy();
+    put(objects.owner, 0x528, address(objects.proxy));
+    require(inspect() == Outcome::Mismatch, "proxy ID offset must be eight");
+    objects.attachProxy();
+    put(objects.proxy, 0x40, fakeFrame + propertyPaint::proxyHostTypeRva + 8);
+    require(inspect() == Outcome::Mismatch, "wrong proxy host type rejected");
+    objects.attachProxy();
+    put(objects.owner, 0x2A0, fakeFrame + propertyPaint::ownerNativeTypeRva + 8);
+    require(inspect() == Outcome::Mismatch, "wrong native owner type rejected");
+    objects.attachProxy();
+    put(objects.site, 0, fakeFrame + propertyPaint::proxySiteTypeRva);
+    require(inspect() == Outcome::Mismatch, "no recursive or unknown proxy unwrapping");
+    put(objects.site, 0, fakeFrame + siteTypeRva);
+    put(objects.manager, 0x38, address(objects.form));
+    require(inspect() == Outcome::Mismatch && stage == Stage::ManagerLinks,
+        "proxy still requires full palette manager backlinks");
+    put(objects.manager, 0x38, address(objects.form, 0x28));
+    put(objects.node, 0x28, address(objects.site));
+    require(inspect() == Outcome::Mismatch && stage == Stage::FamilyId,
+        "attached instance with same ID must be the registered wrapper");
+    put(objects.node, 0x28, address(objects.site) - 8);
+    put(objects.node, 0x20, DWORD{11});
+    require(inspect() == Outcome::Mismatch, "lower_bound next key is not exact ID");
+    put(objects.node, 0x20, DWORD{9});
+    require(inspect() == Outcome::Mismatch, "lower key branches right without match");
+    objects.setId(10);
+    put(objects.head, 8, address(objects.head));
+    require(inspect() == Outcome::Mismatch, "empty form registry rejected");
+    put(objects.head, 8, address(objects.node));
+    put(objects.node, 0x19, BYTE{1});
+    require(inspect() == Outcome::Mismatch, "foreign sentinel cannot terminate lookup");
+    put(objects.node, 0x19, BYTE{});
+    put(objects.node, 0, address(objects.node));
+    require(inspect() == Outcome::Mismatch, "registry cycle rejected");
+    put(objects.node, 0, ULONG_PTR{});
+    require(inspect() == Outcome::ReadFailure, "null child does not prove registration");
+    put(objects.node, 0, address(objects.head));
+    require(inspect() == Outcome::Accepted, "registry recovered after invalid snapshots");
+
+    alignas(8) BYTE earlier[0x30]{}, later[0x30]{};
+    put(earlier, 0x20, DWORD{8});
+    put(earlier, 0, address(objects.head));
+    put(earlier, 0x10, address(objects.node));
+    put(objects.head, 8, address(earlier));
+    require(inspect() == Outcome::Accepted, "exact registered key reached through right child");
+    put(later, 0x20, MAXDWORD);
+    put(later, 0, address(earlier));
+    put(later, 0x10, address(objects.head));
+    put(objects.head, 8, address(later));
+    require(inspect() == Outcome::Accepted, "registry compares high keys as unsigned");
+
+    alignas(8) BYTE chain[65][0x30]{};
+    for (size_t index = 0; index < 65; ++index) {
+        put(chain[index], 0x20, static_cast<DWORD>(74 - index));
+        put(chain[index], 0, index == 64 ? address(objects.head) : address(chain[index + 1]));
+        put(chain[index], 0x28, address(objects.site) - 8);
+    }
+    put(objects.head, 8, address(chain[1]));
+    require(inspect() == Outcome::Accepted, "exact ID at the 64-node diagnostic limit");
+    put(objects.head, 8, address(chain[0]));
+    require(inspect() == Outcome::Mismatch, "65-node walk fails closed within fixed bound");
+}
+
 void testPatch()
 {
     constexpr SIZE_T length = 0x800000;
@@ -394,6 +528,7 @@ int main()
     testCapture();
     testCountsAndContext();
     testSiteDiagnostics();
+    testProxyAndRegistry();
     testPatch();
     std::puts("PASS: upper property identity, numeric arguments, exact LEA replay and rollback");
 }

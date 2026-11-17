@@ -225,6 +225,22 @@ bool validThumbSurfaceRange(const ThumbSurfaceSample& sample)
         if ((*geometry)[0] >= (*geometry)[2] || (*geometry)[1] >= (*geometry)[3] ||
             (*geometry)[4] >= (*geometry)[6] || (*geometry)[5] >= (*geometry)[7]) return false;
     }
+    if (sample.calls == 1) return sample.geometryMin == first && sample.geometryMax == first;
+    if (sample.calls == 2) {
+        auto second = sample.identity;
+        ThumbSurfaceGeometry geometry{};
+        for (size_t i = 0; i < first.size(); ++i) {
+            if (first[i] != sample.geometryMin[i] && first[i] != sample.geometryMax[i]) return false;
+            geometry[i] = first[i] == sample.geometryMin[i] ? sample.geometryMax[i] : sample.geometryMin[i];
+        }
+        // With two calls, the opposite endpoints must all belong to the same
+        // second observation. Independent valid extrema alone cannot prove this.
+        second.left = geometry[0]; second.top = geometry[1];
+        second.right = geometry[2]; second.bottom = geometry[3];
+        second.thumbLeft = geometry[4]; second.thumbTop = geometry[5];
+        second.thumbRight = geometry[6]; second.thumbBottom = geometry[7];
+        return validThumbSurfaceIdentity(second);
+    }
     return true;
 }
 

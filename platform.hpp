@@ -25,8 +25,9 @@ inline constexpr ULONG_PTR enableSearchResults = 4096;
 inline constexpr ULONG_PTR enablePanelHeaders = 8192;
 inline constexpr ULONG_PTR enableDockSplitter = 16384;
 inline constexpr ULONG_PTR enableScrollerCorner = 32768;
-inline constexpr DWORD themeZoneMask = 65535;
-inline constexpr DWORD themeProfileVersion = 9;
+inline constexpr ULONG_PTR enableScrollerPng = 65536;
+inline constexpr DWORD themeZoneMask = 131071;
+inline constexpr DWORD themeProfileVersion = 10;
 
 enum PaletteColor : size_t {
     treeBackground, treeText, captionBackground, captionText,
@@ -41,6 +42,8 @@ enum PaletteColor : size_t {
     searchResultsBackground, searchResultsText,
     panelHeaderBackground, panelHeaderText, panelBorder, dockSplitterFill,
     scrollerCornerBackground, scrollerCornerBorder,
+    scrollerTrackBackground, scrollerArrowBackground, scrollerArrowGlyph,
+    scrollerArrowHover, scrollerArrowPressed,
     paletteColorCount
 };
 
@@ -49,7 +52,7 @@ struct ThemeProfile {
     DWORD size{sizeof(ThemeProfile)};
     DWORD version{themeProfileVersion};
     DWORD zones{255 | enablePopupMenu | enableToolbarBand | enableToolbarBorder | enableSearchResults |
-                enablePanelHeaders | enableDockSplitter | enableScrollerCorner};
+                enablePanelHeaders | enableDockSplitter | enableScrollerCorner | enableScrollerPng};
     std::array<DWORD, paletteColorCount> colors{
         0x1F2938, 0x80F2C2, 0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5,
         0x1F2938, 0xE5EBF5, 0xA7B5C7, 0xB9D4FF, 0x305A8A, 0x1F2938,
@@ -57,7 +60,8 @@ struct ThemeProfile {
         0x1F2938, 0xE5EBF5, 0x305A8A, 0x2A374A, 0xFFFFFF, 0x000000,
         0x1F2938, 0x2A374A, 0xE5EBF5, 0x878B8F, 0x1F2938, 0x3B4A60,
         0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5, 0x3B4758, 0x3B4758,
-        0x1F2938, 0x3B4758
+        0x1F2938, 0x3B4758,
+        0x1F2938, 0x2A374A, 0xE5EBF5, 0x3B4A60, 0x305A8A
     };
 };
 
@@ -76,6 +80,8 @@ inline constexpr auto graphicsHash =
     L"125C00C01E7780704AD3E2159170DD7E1A05EF8CF9B2ED32B0B30CB535C4A563";
 inline constexpr auto wbaseHash =
     L"8BC18B9428A1FCFABD77FB1D30D660860434B9F8F1586DFF0387E396F7DA53DE";
+inline constexpr auto cairoHash =
+    L"8B790F026318882AB0A054E6228B1C0C0A210512582C6D6D001E2EFB42256109";
 
 inline std::wstring modulePath(HMODULE module)
 {

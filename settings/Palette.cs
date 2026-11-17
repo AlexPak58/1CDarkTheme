@@ -13,15 +13,17 @@ internal sealed record Preset(string Name, int Mask, string[] Colors);
 
 internal static class Palette
 {
-    public const int Version = 9;
-    public const int AllZones = 65535;
-    public const int ColorCount = 39;
+    public const int Version = 10;
+    public const int AllZones = 131071;
+    public const int ColorCount = 44;
     public const int PanelHeaders = 8192;
     public const int DockSplitters = 16384;
     public const int DockSplitterFill = 36;
     public const int ScrollerCorner = 32768;
     public const int ScrollerCornerFill = 37;
-    private const int DefaultZones = 7935 | PanelHeaders | DockSplitters | ScrollerCorner;
+    public const int ScrollerPng = 65536;
+    public const int ScrollerTrack = 39;
+    private const int DefaultZones = 7935 | PanelHeaders | DockSplitters | ScrollerCorner | ScrollerPng;
     public const int MaxPresetName = 60;
     public const string DefaultName = "Тёмная";
     public const string GraphiteName = "Графитовая";
@@ -48,7 +50,10 @@ internal static class Palette
             ["Фон рамки и заголовка", "Текст заголовка", "Наружная рамка панелей"],
             "Цвет контура дочерних окон и поддерживаемых рамок панелей."),
         new(DockSplitters, "Разделители панелей", DockSplitterFill, ["Фон разделителей панелей"]),
-        new(ScrollerCorner, "Угол полос прокрутки редактора", ScrollerCornerFill, ["Фон", "Граница"])
+        new(ScrollerCorner, "Угол полос прокрутки редактора", ScrollerCornerFill, ["Фон", "Граница"]),
+        new(ScrollerPng, "Дорожки и стрелки прокрутки", ScrollerTrack,
+            ["Фон дорожки", "Фон кнопок", "Стрелки", "Кнопки при наведении", "Нажатые кнопки"],
+            "Полосы прокрутки дерева конфигурации и редактора модулей. Ползунок сохраняет штатные цвета.")
     ];
 
     private static readonly string[] Dark =
@@ -59,7 +64,8 @@ internal static class Palette
         "#2A374A", "#1F2938", "#E5EBF5", "#305A8A", "#2A374A", "#FFFFFF", "#000000",
         "#1F2938", "#2A374A", "#E5EBF5", "#878B8F", "#1F2938", "#3B4A60",
         "#1F2938", "#E5EBF5", "#1F2938", "#E5EBF5", "#3B4758", "#3B4758",
-        "#1F2938", "#3B4758"
+        "#1F2938", "#3B4758",
+        "#1F2938", "#2A374A", "#E5EBF5", "#3B4A60", "#305A8A"
     ];
 
     public static readonly Preset[] BuiltIns =
@@ -73,7 +79,8 @@ internal static class Palette
             "#3A373B", "#262629", "#F3F0ED", "#614742", "#3A373B", "#FFFFFF", "#000000",
             "#262629", "#3A373B", "#F3F0ED", "#8E8882", "#262629", "#464249",
             "#262629", "#F3F0ED", "#262629", "#F3F0ED", "#49454C", "#49454C",
-            "#262629", "#49454C"
+            "#262629", "#49454C",
+            "#262629", "#3A373B", "#F3F0ED", "#49454C", "#614742"
         ]),
         new(PinkName, DefaultZones,
         [
@@ -83,7 +90,8 @@ internal static class Palette
             "#F6DCE7", "#F9E7EE", "#3C2433", "#E9AAC5", "#F6DCE7", "#FFFFFF", "#000000",
             "#FFF4F7", "#F6DCE7", "#3C2433", "#663B4F", "#F9E7EE", "#B47C96",
             "#FFF4F7", "#3C2433", "#F8E1E9", "#3C2433", "#B87999", "#D9ADBF",
-            "#F9E7EE", "#B87999"
+            "#F9E7EE", "#B87999",
+            "#F9E7EE", "#F6DCE7", "#523044", "#E9AAC5", "#D58DAF"
         ]),
         new(NativeName, 0, Dark)
     ];
@@ -98,6 +106,7 @@ internal static class Palette
         6 => (16383, 35),
         7 => (16383, 36),
         8 => (32767, 37),
+        9 => (65535, 39),
         Version => (AllZones, ColorCount),
         _ => throw new InvalidDataException("Неподдерживаемая версия палитры.")
     };

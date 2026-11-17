@@ -5,6 +5,7 @@
 #include "panel_headers.hpp"
 #include "dock_splitters.hpp"
 #include "scroller_corner.hpp"
+#include "scroller_png_hook.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -647,6 +648,10 @@ DWORD applyProfile(const ThemeProfile& profile, ULONG_PTR zones)
     if (zones && (installationResult == ERROR_NOT_READY || installationResult == ERROR_MOD_NOT_FOUND))
         installationResult = installSites();
     if (zones && installationResult != ERROR_SUCCESS) return installationResult;
+    if (zones & enableScrollerPng) {
+        const auto pngResult = scroller_png_hook::ensure(frameBase, graphicsBase, wbaseBase, activeProfile);
+        if (pngResult) return pngResult;
+    }
 
     if (zones && designerMainWindow(mainWindow.window, pid) != mainWindow) return ERROR_NOT_READY;
     if (const auto captionResult = applyCaption(profile, zones, mainWindow)) {
@@ -704,7 +709,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
 }
 
 #ifndef THEME_BACKGROUND_ONLY
-extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV9(LPVOID)
+extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV10(LPVOID)
 {
     return themeProfileVersion;
 }

@@ -32,10 +32,16 @@ int wmain(int argc, wchar_t** argv)
         return input;
     };
     ThemeProfile profile;
-    check(parseProfile(palette(themeZoneMask, 39), profile) && profile.zones == themeZoneMask &&
-          profile.colors[scrollerCornerBackground] == 0xABCDEF && profile.colors[scrollerCornerBorder] == 0xABCDEF, "parse v9 corner independently of zone mask");
-    constexpr DWORD legacyMasks[] = {511, 1023, 2047, 4095, 8191, 16383, 16383, 32767};
-    constexpr size_t legacyCounts[] = {25, 29, 30, 31, 33, 35, 36, 37};
+    check(parseProfile(palette(themeZoneMask, 44), profile) && profile.zones == themeZoneMask &&
+          std::all_of(profile.colors.begin(), profile.colors.end(), [](DWORD color) { return color == 0xABCDEF; }),
+          "maximum six-digit mask accepts all v10 colors");
+    check(!parseProfile(palette(131072, 44), profile) && !parseProfile(palette(999999, 44), profile) &&
+          !parseProfile(palette(1000000, 44), profile) && !parseProfile(L"-" + palette(65536, 44), profile),
+          "out-of-range, overlong and negative masks refused");
+    check(parseProfile(palette(0, 44), profile) && !profile.zones && profile.colors.back() == 0xABCDEF,
+          "v10 colors parse with no zones enabled");
+    constexpr DWORD legacyMasks[] = {511, 1023, 2047, 4095, 8191, 16383, 16383, 32767, 65535};
+    constexpr size_t legacyCounts[] = {25, 29, 30, 31, 33, 35, 36, 37, 39};
     const ThemeProfile defaults;
     for (size_t i = 0; i < std::size(legacyCounts); ++i) {
         const auto count = legacyCounts[i];
@@ -48,7 +54,8 @@ int wmain(int argc, wchar_t** argv)
         check(!parseProfile(palette(zones + 1, count), profile), "legacy mask outside palette range refused");
     }
     check(parseProfile(palette(0, 35), profile) && !profile.zones, "legacy native palette keeps zones disabled");
-    check(!parseProfile(palette(0, 34), profile) && !parseProfile(palette(0, 38), profile),
+    check(!parseProfile(palette(0, 34), profile) && !parseProfile(palette(0, 38), profile) &&
+          !parseProfile(palette(0, 40), profile) && !parseProfile(palette(0, 43), profile),
           "unexpected color counts refused");
     check(!parseProfile(palette(8192, 35) + L",GGGGGG", profile), "invalid v7 border refused");
 
@@ -56,11 +63,15 @@ int wmain(int argc, wchar_t** argv)
     admission.frame = L"frame";
     admission.graphics = L"graphics";
     admission.frontend = L"frontend";
+    admission.cairo = L"cairo";
     unsigned hashes{};
     bool admitWbase{};
+    bool admitCairo{};
     const auto hashFixture = [&](const std::wstring& path, const wchar_t* expected) {
         ++hashes;
-        return path != L"wbase" || (admitWbase && std::wstring_view(expected) == wbaseHash);
+        if (path == L"wbase") return admitWbase && std::wstring_view(expected) == wbaseHash;
+        if (path == L"cairo") return admitCairo && std::wstring_view(expected) == cairoHash;
+        return true;
     };
     check(validateAttachModules(admission, hashFixture) == ERROR_MOD_NOT_FOUND && hashes == 0,
           "missing wbase refused before any remote load or hash check");
@@ -68,8 +79,15 @@ int wmain(int argc, wchar_t** argv)
     check(validateAttachModules(admission, hashFixture) == ERROR_REVISION_MISMATCH && hashes == 4,
           "wbase mismatch refused in preflight");
     admitWbase = true;
-    check(validateAttachModules(admission, hashFixture) == ERROR_SUCCESS && hashes == 8,
-          "all four admitted module hashes permit attachment");
+    admission.cairo.clear();
+    check(validateAttachModules(admission, hashFixture) == ERROR_MOD_NOT_FOUND && hashes == 4,
+          "missing Cairo refused before any remote load or hash check");
+    admission.cairo = L"cairo";
+    check(validateAttachModules(admission, hashFixture) == ERROR_REVISION_MISMATCH && hashes == 9,
+          "Cairo mismatch refused in preflight");
+    admitCairo = true;
+    check(validateAttachModules(admission, hashFixture) == ERROR_SUCCESS && hashes == 14,
+          "all five admitted module hashes permit attachment");
 
     const auto pid = GetCurrentProcessId();
     FILETIME created{}, exited{}, kernel{}, user{};
@@ -113,8 +131,8 @@ int wmain(int argc, wchar_t** argv)
     const HMODULE loaded = LoadLibraryW(imagePath.c_str());
     check(loaded != nullptr, "load production fixture only into this test process");
     AttachImage image(imagePath);
-    check(image.validate() && GetProcAddress(loaded, "ThemeProfileAttachV9"),
-          "production image has v9 attach ABI and executable setter");
+    check(image.validate() && GetProcAddress(loaded, "ThemeProfileAttachV10"),
+          "production image has v10 attach ABI and executable setter");
     AttachModules modules;
     check(snapshotAttachModules(pid, imagePath, modules) == ERROR_SUCCESS &&
           modules.ownBase == reinterpret_cast<ULONG_PTR>(loaded) && !modules.competingDll, "matching mapped path");

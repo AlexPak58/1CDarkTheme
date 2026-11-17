@@ -117,7 +117,8 @@ bool admittedThemePresent(HANDLE process, const std::vector<ProbeModule>& module
     AttachModules mapped;
     mapped.ownBase = theme->base;
     mapped.ownSize = theme->size;
-    return image.validate() && image.remoteSetter(process, mapped);
+    // This historical probe's fixed production hash belongs specifically to v9.
+    return image.validate("SetThemeProfile", "ThemeProfileAttachV9") && image.remoteSetter(process, mapped);
 }
 
 bool originalPngIat(HANDLE process, const ProbeModule& graphics, const ProbeModule& cairo,

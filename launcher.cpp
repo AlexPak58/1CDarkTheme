@@ -251,7 +251,7 @@ bool serverRef(const std::wstring& target)
 bool parseProfile(std::wstring_view input, ThemeProfile& profile)
 {
     const auto separator = input.find(L':');
-    if (separator == std::wstring_view::npos || separator == 0 || separator > 5)
+    if (separator == std::wstring_view::npos || separator == 0 || separator > 6)
         return false;
     DWORD zones{};
     for (const wchar_t digit : input.substr(0, separator)) {
@@ -263,6 +263,7 @@ bool parseProfile(std::wstring_view input, ThemeProfile& profile)
     if ((input.size() + 1) % 7 != 0) return false;
     const size_t colorCount = (input.size() + 1) / 7;
     if (colorCount != paletteColorCount &&
+        !(colorCount == scrollerTrackBackground && zones < enableScrollerPng) &&
         !(colorCount == scrollerCornerBackground && zones < enableScrollerCorner) &&
         !(colorCount == dockSplitterFill && zones < enableDockSplitter) &&
         !(colorCount == panelBorder && zones < enableDockSplitter) &&
@@ -471,15 +472,18 @@ struct AttachModules {
     std::wstring graphics;
     std::wstring frontend;
     std::wstring wbase;
+    std::wstring cairo;
 };
 
 template<typename HashCheck>
 DWORD validateAttachModules(const AttachModules& modules, HashCheck matches)
 {
-    if (modules.frame.empty() || modules.graphics.empty() || modules.frontend.empty() || modules.wbase.empty())
+    if (modules.frame.empty() || modules.graphics.empty() || modules.frontend.empty() || modules.wbase.empty() ||
+        modules.cairo.empty())
         return ERROR_MOD_NOT_FOUND;
     if (!matches(modules.frame, frameHash) || !matches(modules.graphics, graphicsHash) ||
-        !matches(modules.frontend, listFrontendHash) || !matches(modules.wbase, wbaseHash))
+        !matches(modules.frontend, listFrontendHash) || !matches(modules.wbase, wbaseHash) ||
+        !matches(modules.cairo, cairoHash))
         return ERROR_REVISION_MISMATCH;
     return ERROR_SUCCESS;
 }
@@ -509,6 +513,8 @@ DWORD snapshotAttachModules(DWORD pid, const std::wstring& dll, AttachModules& m
             modules.frontend = item.szExePath;
         } else if (pathEqual(L"wbase83.dll", item.szModule)) {
             modules.wbase = item.szExePath;
+        } else if (pathEqual(L"cairo.dll", item.szModule)) {
+            modules.cairo = item.szExePath;
         }
     } while (Module32NextW(snapshot, &item));
     const auto error = GetLastError();
@@ -592,6 +598,7 @@ DWORD loadLaunchedTheme(HANDLE child, DWORD pid, const std::wstring& dll, ULONG_
     AttachModules modules;
     if (const auto error = snapshotAttachModules(pid, dll, modules)) return error;
     if (modules.competingDll) return ERROR_ALREADY_EXISTS;
+    if (const auto error = validateAttachModules(modules, matchesSha256)) return error;
     if (!modules.ownBase) return loadTheme(child, pid, dll, setter, exportName);
     const Handle imageFile(CreateFileW(dll.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
@@ -810,8 +817,8 @@ int wmain(int argc, wchar_t** argv)
     const bool profileMode = argc == 5 && std::wstring_view(argv[3]) == L"--palette";
     ThemeProfile profile;
     if (profileMode && !parseProfile(argv[4], profile)) {
-        std::fputs("Invalid palette. Expected a zone mask and 39 six-digit RGB colors "
-                   "(25, 29, 30, 31, 33, 35, 36 or 37 for legacy palettes).\n", stderr);
+        std::fputs("Invalid palette. Expected a zone mask and 44 six-digit RGB colors "
+                   "(25, 29, 30, 31, 33, 35, 36, 37 or 39 for legacy palettes).\n", stderr);
         return 2;
     }
     ULONG_PTR selection{};

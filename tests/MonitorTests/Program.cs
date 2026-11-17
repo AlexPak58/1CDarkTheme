@@ -87,13 +87,18 @@ var updatedDark = dark with { Colors = [..dark.Colors] };
 updatedDark.Colors[36] = "#124578";
 updatedDark.Colors[37] = "#112244";
 updatedDark.Colors[38] = "#667799";
+updatedDark.Colors[39] = "#293A4B";
+updatedDark.Colors[40] = "#647586";
+updatedDark.Colors[41] = "#A8B9CA";
+updatedDark.Colors[42] = "#204162";
+updatedDark.Colors[43] = "#6480A2";
 PresetFile.Save(defaultPath, updatedDark);
 await monitor.PollOnceAsync();
-var splitterProfile = requests[^1].Item2;
+var updatedProfile = requests[^1].Item2;
 Check(requests.Count == 2 && requests[^1].Item1 == designer.Identity &&
-    splitterProfile.StartsWith("65279:", StringComparison.Ordinal) &&
-    splitterProfile.Split(',').Length == 39 && splitterProfile.EndsWith(",124578,112244,667799", StringComparison.Ordinal),
-    "Changed splitter and corner colors at the same path reapply");
+    updatedProfile.StartsWith("130815:", StringComparison.Ordinal) && updatedProfile.Split(',').Length == 44 &&
+    updatedProfile.EndsWith(",124578,112244,667799,293A4B,647586,A8B9CA,204162,6480A2", StringComparison.Ordinal),
+    "Changed splitter, corner and scroller colors at the same path reapply");
 
 config = config with { Rules = [new(null, platform, "Designer", "override.json")] };
 ThemeConfiguration.Save(configPath, config);

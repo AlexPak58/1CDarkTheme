@@ -73,12 +73,17 @@ int main(int argc, char** argv)
     check(argc == 2, "expected process mode");
     installationResult = ERROR_SUCCESS;  // Bypass production code patching in this standalone test.
     ThemeProfile profile;
-    check(profile.version == 9 && profile.size == 168 && profile.zones == 65279 &&
-          panelBorder == 35 && dockSplitterFill == 36 && scrollerCornerBackground == 37 && scrollerCornerBorder == 38 && paletteColorCount == 39 &&
+    check(profile.version == 10 && profile.size == 188 && profile.zones == 130815 &&
+          panelBorder == 35 && dockSplitterFill == 36 && scrollerCornerBackground == 37 && scrollerCornerBorder == 38 &&
+          scrollerTrackBackground == 39 && scrollerArrowBackground == 40 && scrollerArrowGlyph == 41 &&
+          scrollerArrowHover == 42 && scrollerArrowPressed == 43 && paletteColorCount == 44 &&
           profile.colors[panelHeaderBackground] == 0x1F2938 && profile.colors[panelHeaderText] == 0xE5EBF5 &&
           profile.colors[panelBorder] == 0x3B4758 && profile.colors[dockSplitterFill] == 0x3B4758 &&
-          profile.colors[scrollerCornerBackground] == 0x1F2938 && profile.colors[scrollerCornerBorder] == 0x3B4758,
-          "native defaults include panel headers, border and dock splitters");
+          profile.colors[scrollerCornerBackground] == 0x1F2938 && profile.colors[scrollerCornerBorder] == 0x3B4758 &&
+          profile.colors[scrollerTrackBackground] == 0x1F2938 && profile.colors[scrollerArrowBackground] == 0x2A374A &&
+          profile.colors[scrollerArrowGlyph] == 0xE5EBF5 && profile.colors[scrollerArrowHover] == 0x3B4A60 &&
+          profile.colors[scrollerArrowPressed] == 0x305A8A,
+          "dark profile defaults include panel headers, borders, dock splitters and scroller colors");
     profile.zones = enableSearchResults;
     if (std::strcmp(argv[1], "DESIGNER") != 0) {
         check(SetThemeProfile(&profile) == ERROR_NOT_SUPPORTED, "DLL rejects Enterprise mode");

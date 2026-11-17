@@ -213,6 +213,21 @@ bool validThumbSurfaceIdentity(const ThumbSurfaceIdentity& id)
     return id.stride >= minStride;
 }
 
+bool validThumbSurfaceRange(const ThumbSurfaceSample& sample)
+{
+    const auto first = thumbSurfaceGeometry(sample.identity);
+    for (size_t i = 0; i < first.size(); ++i) {
+        if (sample.geometryMin[i] > first[i] || first[i] > sample.geometryMax[i]) return false;
+    }
+    // Each accepted rectangle is nonempty. Its independent endpoint extrema
+    // preserve these inequalities, even though cross-coordinate combinations need not occur.
+    for (const auto* geometry : {&sample.geometryMin, &sample.geometryMax}) {
+        if ((*geometry)[0] >= (*geometry)[2] || (*geometry)[1] >= (*geometry)[3] ||
+            (*geometry)[4] >= (*geometry)[6] || (*geometry)[5] >= (*geometry)[7]) return false;
+    }
+    return true;
+}
+
 ULONGLONG thumbStage(const ThumbSurfaceTrace& trace, ThumbSurfaceStage stage)
 {
     return trace.stages[static_cast<size_t>(stage)];
@@ -308,9 +323,10 @@ bool validThumbTrace(const ThumbSurfaceTrace& trace)
     auto remaining = thumbStage(trace, ThumbSurfaceStage::Accepted);
     for (DWORD i = 0; i < trace.sampleCount; ++i) {
         const auto& row = trace.samples[i];
-        if (!row.calls || row.calls > remaining || !validThumbSurfaceIdentity(row.identity)) return false;
+        if (!row.calls || row.calls > remaining || !validThumbSurfaceIdentity(row.identity) ||
+            !validThumbSurfaceRange(row)) return false;
         for (DWORD j = 0; j < i; ++j)
-            if (row.identity == trace.samples[j].identity) return false;
+            if (sameThumbSurfaceGroup(row.identity, trace.samples[j].identity)) return false;
         remaining -= row.calls;
     }
     return remaining == trace.capacityDrops;
@@ -368,12 +384,19 @@ void printThumbTrace(const ThumbSurfaceTrace& trace, DWORD pid, ULONGLONG creati
                     "\"componentOffset\":%lu,\"drawReturnRva\":%lu,\"orientation\":%lu,\"hotId\":%lu,\"pressedId\":%lu,"
                     "\"cacheState\":%lu,\"enabled\":%lu,\"interactive\":%lu,\"rect\":[%ld,%ld,%ld,%ld],"
                     "\"thumbRect\":[%ld,%ld,%ld,%ld],\"surfaceType\":%ld,\"format\":%ld,\"width\":%ld,\"height\":%ld,"
-                    "\"stride\":%ld,\"status\":%ld,\"deviceScale\":[%.17g,%.17g],\"deviceOffset\":[%.17g,%.17g]}",
+                    "\"stride\":%ld,\"status\":%ld,\"deviceScale\":[%.17g,%.17g],\"deviceOffset\":[%.17g,%.17g]",
                     i ? "," : "", row.calls, id.windowTableRva, id.scrollerTableRva, id.componentOffset,
                     id.drawReturnRva, id.orientation, id.hotId, id.pressedId, id.cacheState, id.enabled, id.interactive,
                     id.left, id.top, id.right, id.bottom, id.thumbLeft, id.thumbTop, id.thumbRight, id.thumbBottom,
                     id.surfaceType, id.format, id.width, id.height, id.stride, id.status,
                     id.deviceScaleX, id.deviceScaleY, id.deviceOffsetX, id.deviceOffsetY);
+        std::fputs(",\"geometryMin\":[", stdout);
+        for (size_t coordinate = 0; coordinate < row.geometryMin.size(); ++coordinate)
+            std::printf("%s%ld", coordinate ? "," : "", row.geometryMin[coordinate]);
+        std::fputs("],\"geometryMax\":[", stdout);
+        for (size_t coordinate = 0; coordinate < row.geometryMax.size(); ++coordinate)
+            std::printf("%s%ld", coordinate ? "," : "", row.geometryMax[coordinate]);
+        std::fputs("]}", stdout);
     }
     const bool clean = !trace.busyDrops && !trace.capacityDrops && !thumbStage(trace, ThumbSurfaceStage::ReadFailure) &&
         !thumbStage(trace, ThumbSurfaceStage::SurfaceError) && !thumbStage(trace, ThumbSurfaceStage::SurfaceType) &&

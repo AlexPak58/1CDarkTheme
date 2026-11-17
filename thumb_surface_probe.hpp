@@ -3,15 +3,15 @@
 #include "platform.hpp"
 #include <type_traits>
 
-inline constexpr DWORD thumbSurfaceProbeVersion = 4;
+inline constexpr DWORD thumbSurfaceProbeVersion = 5;
 inline constexpr DWORD thumbSurfaceCaptureMs = 60000;
 inline constexpr size_t thumbSurfaceCapacity = 128;
 inline constexpr auto thumbSurfaceImageUiHash =
     L"C807765D1C990287EDDF752A53F7E0335269AF2B8ADD4FCE20920ED99E387846";
 inline constexpr auto thumbSurfaceImageHash =
     L"5F7F474CA58EDAEC4BC12478432D7D56C7EC092A92CED94FA0C0873B5D38B288";
-inline constexpr char thumbSurfaceRunExport[] = "RunThumbSurfaceProbeV4";
-inline constexpr char thumbSurfaceAbiExport[] = "ThumbSurfaceProbeAbiV4";
+inline constexpr char thumbSurfaceRunExport[] = "RunThumbSurfaceProbeV5";
+inline constexpr char thumbSurfaceAbiExport[] = "ThumbSurfaceProbeAbiV5";
 
 enum class ThumbSurfaceStage : DWORD {
     OtherCall, GraphicsChain, DrawReturn, DelegatedDraw, DelegatedFrames, PaintReturn, OwnerReturn,
@@ -40,8 +40,27 @@ struct ThumbSurfaceIdentity {
     bool operator==(const ThumbSurfaceIdentity&) const = default;
 };
 
+// Coordinates are independent intervals, not an assertion that every combination occurred.
+using ThumbSurfaceGeometry = std::array<LONG, 8>;
+inline ThumbSurfaceGeometry thumbSurfaceGeometry(const ThumbSurfaceIdentity& id)
+{
+    return {id.left, id.top, id.right, id.bottom,
+            id.thumbLeft, id.thumbTop, id.thumbRight, id.thumbBottom};
+}
+
+inline bool sameThumbSurfaceGroup(ThumbSurfaceIdentity a, ThumbSurfaceIdentity b)
+{
+    // Keep every semantic field in the key; omit only absolute paint coordinates.
+    a.left = a.top = a.right = a.bottom = 0;
+    a.thumbLeft = a.thumbTop = a.thumbRight = a.thumbBottom = 0;
+    b.left = b.top = b.right = b.bottom = 0;
+    b.thumbLeft = b.thumbTop = b.thumbRight = b.thumbBottom = 0;
+    return a == b;
+}
+
 struct ThumbSurfaceSample {
     ThumbSurfaceIdentity identity;
+    ThumbSurfaceGeometry geometryMin{}, geometryMax{};
     ULONGLONG calls{};
 };
 
@@ -55,6 +74,6 @@ struct ThumbSurfaceTrace {
 };
 
 static_assert(sizeof(ThumbSurfaceIdentity) == 136);
-static_assert(sizeof(ThumbSurfaceSample) == 144);
-static_assert(sizeof(ThumbSurfaceTrace) == 18768);
+static_assert(sizeof(ThumbSurfaceSample) == 208);
+static_assert(sizeof(ThumbSurfaceTrace) == 26960);
 static_assert(std::is_standard_layout_v<ThumbSurfaceTrace> && std::is_trivially_copyable_v<ThumbSurfaceTrace>);

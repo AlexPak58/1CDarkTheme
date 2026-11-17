@@ -271,13 +271,20 @@ inline void record(Stage stage, const ThumbSurfaceIdentity& id, const CacheObser
     }
     if (stage != Stage::Accepted) return;
     size_t index{};
-    while (index < observations.sampleCount && !(observations.samples[index].identity == id)) ++index;
+    while (index < observations.sampleCount && !sameThumbSurfaceGroup(observations.samples[index].identity, id)) ++index;
     if (index == observations.sampleCount) {
         if (index == observations.samples.size()) { ++observations.capacityDrops; return; }
         observations.samples[index].identity = id;
+        observations.samples[index].geometryMin = observations.samples[index].geometryMax = thumbSurfaceGeometry(id);
         ++observations.sampleCount;
     }
-    ++observations.samples[index].calls;
+    auto& sample = observations.samples[index];
+    const auto geometry = thumbSurfaceGeometry(id);
+    for (size_t i = 0; i < geometry.size(); ++i) {
+        if (geometry[i] < sample.geometryMin[i]) sample.geometryMin[i] = geometry[i];
+        if (geometry[i] > sample.geometryMax[i]) sample.geometryMax[i] = geometry[i];
+    }
+    ++sample.calls;
 }
 
 inline bool active(ULONGLONG end)

@@ -424,6 +424,75 @@ void testCacheDiagnostics(Fixture& f)
     f.binding.api.status = f.api.status;
 }
 
+void testCompactGrouping(Fixture& f)
+{
+    observations = {};
+    busyDrops.store(0);
+    f.route();
+    f.surface = {};
+    images = f.routes;
+    armedBinding = &f.binding;
+    deadline.store(GetTickCount64() + thumbSurfaceCaptureMs);
+    const auto collect = [&] { observe(ptr(f.stack), &f.surface, f.binding); };
+    ThumbSurfaceGeometry minimum{}, maximum{};
+    ThumbSurfaceIdentity first{};
+    for (LONG i = 0; i < 600; ++i) {
+        const LONG x = i == 598 ? (std::numeric_limits<LONG>::min)() :
+                       i == 599 ? (std::numeric_limits<LONG>::max)() - 100 : i * 13 - 4000;
+        const LONG y = i == 598 ? (std::numeric_limits<LONG>::max)() - 100 :
+                       i == 599 ? (std::numeric_limits<LONG>::min)() : 3000 - i * 11;
+        put(f.scroller, 0xE8, RECT{x, y, x + 20, y + 50});
+        put(f.stack, paintFrame + 0xD8, RECT{x + 1, y + 2, x + 10, y + 15});
+        ThumbSurfaceIdentity id{};
+        check(f.locate(id) == Stage::Accepted && readSurface(f.api, &f.surface, id) == Stage::Accepted,
+            "position fixture passes unchanged geometry and Cairo admission");
+        const auto geometry = thumbSurfaceGeometry(id);
+        if (!i) { first = id; minimum = maximum = geometry; }
+        for (size_t coordinate = 0; coordinate < geometry.size(); ++coordinate) {
+            if (geometry[coordinate] < minimum[coordinate]) minimum[coordinate] = geometry[coordinate];
+            if (geometry[coordinate] > maximum[coordinate]) maximum[coordinate] = geometry[coordinate];
+        }
+        collect();
+    }
+    check(observations.sampleCount == 1 && observations.samples[0].calls == 600 &&
+        !observations.capacityDrops && observations.samples[0].identity == first &&
+        observations.samples[0].geometryMin == minimum && observations.samples[0].geometryMax == maximum,
+        "hundreds of valid positions compact without loss and retain first identity and signed coordinate extrema");
+    put(f.stack, paintFrame + 0xD8, RECT{0, 0, 0, 2});
+    collect();
+    check(observations.sampleCount == 1 && observations.samples[0].calls == 600 && hits(observations, Stage::Owner) == 1,
+        "invalid geometry rejected before grouping");
+    deadline.store(0);
+
+    // Exercise the actual collector key for every non-coordinate identity field.
+    // These synthetic one-field changes test key completeness, independently of route admission.
+    observations = {};
+    const CacheObservation cache{};
+    record(Stage::Accepted, first, cache);
+    const auto split = [&](const ThumbSurfaceIdentity& id) {
+        const auto before = observations.sampleCount;
+        check(!sameThumbSurfaceGroup(first, id), "semantic field remains in group key");
+        record(Stage::Accepted, id, cache);
+        check(observations.sampleCount == before + 1, "changed semantic field creates a collector group");
+    };
+    for (auto field : {&ThumbSurfaceIdentity::windowTableRva, &ThumbSurfaceIdentity::scrollerTableRva,
+         &ThumbSurfaceIdentity::componentOffset, &ThumbSurfaceIdentity::drawReturnRva, &ThumbSurfaceIdentity::orientation,
+         &ThumbSurfaceIdentity::hotId, &ThumbSurfaceIdentity::pressedId, &ThumbSurfaceIdentity::cacheState,
+         &ThumbSurfaceIdentity::enabled, &ThumbSurfaceIdentity::interactive, &ThumbSurfaceIdentity::reserved1,
+         &ThumbSurfaceIdentity::reserved2}) {
+        auto id = first; ++(id.*field); split(id);
+    }
+    for (auto field : {&ThumbSurfaceIdentity::surfaceType, &ThumbSurfaceIdentity::format, &ThumbSurfaceIdentity::width,
+         &ThumbSurfaceIdentity::height, &ThumbSurfaceIdentity::stride, &ThumbSurfaceIdentity::status}) {
+        auto id = first; ++(id.*field); split(id);
+    }
+    for (auto field : {&ThumbSurfaceIdentity::deviceScaleX, &ThumbSurfaceIdentity::deviceScaleY,
+         &ThumbSurfaceIdentity::deviceOffsetX, &ThumbSurfaceIdentity::deviceOffsetY}) {
+        auto id = first; id.*field += 0.5; split(id);
+    }
+    observations = {};
+}
+
 void testCapture(Fixture& f)
 {
     f.route();
@@ -438,6 +507,11 @@ void testCapture(Fixture& f)
         f.surface.ox = static_cast<double>(i);
         collect();
     }
+    // Full capacity still permits an existing key at a new absolute position.
+    f.surface.ox = -2;
+    put(f.scroller, 0xE8, RECT{100, 200, 114, 241});
+    put(f.stack, paintFrame + 0xD8, RECT{101, 202, 113, 217});
+    collect();
     AcquireSRWLockExclusive(&collectorLock);
     collect();
     ThumbSurfaceTrace closed{};
@@ -448,19 +522,21 @@ void testCapture(Fixture& f)
     deadline.store(GetTickCount64());
     collect();
     check(copySamples(closed) == ERROR_SUCCESS && closed.sampleCount == thumbSurfaceCapacity &&
-        closed.samples[0].calls == 2 && closed.capacityDrops == 1 && closed.busyDrops == 1 &&
-        hits(closed, Stage::Accepted) == thumbSurfaceCapacity + 2, "expiry and coherent bounded aggregation");
+        closed.samples[0].calls == 3 && closed.samples[0].geometryMax[0] == 100 && closed.capacityDrops == 1 && closed.busyDrops == 1 &&
+        hits(closed, Stage::Accepted) == thumbSurfaceCapacity + 3, "expiry and coherent bounded aggregation");
     deadline.store(GetTickCount64() + thumbSurfaceCaptureMs);
     f.binding.api.status = expireInGetter;
     collect();
     f.binding.api.status = f.api.status;
-    check(copySamples(closed) == ERROR_SUCCESS && hits(closed, Stage::Accepted) == thumbSurfaceCapacity + 2,
+    check(copySamples(closed) == ERROR_SUCCESS && hits(closed, Stage::Accepted) == thumbSurfaceCapacity + 3,
         "deadline closure while reading prevents blind late recording");
 }
 
 void testRunBoundaries()
 {
     ThumbSurfaceTrace trace{};
+    trace.version = 4;
+    check(run(&trace) == ERROR_INVALID_PARAMETER && !attempted && !deadline.load(), "legacy v4 ABI does not consume one-shot");
     trace.version = 3;
     check(run(&trace) == ERROR_INVALID_PARAMETER && !attempted && !deadline.load(), "legacy v3 ABI does not consume one-shot");
     trace.version = 2;
@@ -578,6 +654,7 @@ int main()
     testRoutes(f);
     testMetadata(f);
     testCacheDiagnostics(f);
+    testCompactGrouping(f);
     testCapture(f);
     testBindingStatus();
     testDiagnosticWrapper(f);

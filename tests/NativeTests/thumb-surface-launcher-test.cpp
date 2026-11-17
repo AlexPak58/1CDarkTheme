@@ -188,6 +188,7 @@ void testTrace()
     methodsMatch = original + aggregate;
     id = {0xABEDB0, 0x3CA78, 0x50, 0x1A030, 1, 5, 0, 2, 1, 1, 0, 0,
           0, 0, 20, 50, 1, 2, 10, 15, 0, 1, 13, 17, 52, 0, 1, 1, 0, 0};
+    sample.geometryMin = sample.geometryMax = thumbSurfaceGeometry(id);
     require(validThumbTrace(trace), "valid horizontal image metadata from the aggregate pair accepted");
     id.enabled = 0; require(!validThumbTrace(trace), "cache state must match enabled and interactive flags"); id.enabled = 1;
     id.drawReturnRva = 0x19AF5; require(!validThumbTrace(trace), "piece must match orientation"); id.drawReturnRva = 0x1A030;
@@ -196,17 +197,35 @@ void testTrace()
     id.stride = 48; require(!validThumbTrace(trace), "rejects insufficient stride"); id.stride = 52;
     id.surfaceType = 1; require(!validThumbTrace(trace), "only image surface admitted"); id.surfaceType = 0;
     id.scrollerTableRva = 0x3CD00; require(!validThumbTrace(trace), "rejects mismatched owners"); id.scrollerTableRva = 0x3CA78;
+    auto savedMin = sample.geometryMin, savedMax = sample.geometryMax;
+    sample.geometryMin[0] = id.left + 1;
+    require(!validThumbTrace(trace), "range must contain first identity");
+    sample.geometryMin = savedMin;
+    sample.geometryMax[2] = id.right - 1;
+    require(!validThumbTrace(trace), "upper range must contain first identity");
+    sample.geometryMax = savedMax;
+    sample.geometryMin[2] = sample.geometryMin[0];
+    require(!validThumbTrace(trace), "endpoint extrema must admit nonempty rectangles");
+    sample.geometryMin = savedMin;
+    sample.geometryMin[0] = (std::numeric_limits<LONG>::min)();
+    sample.geometryMax[2] = (std::numeric_limits<LONG>::max)();
+    require(validThumbTrace(trace), "signed extreme coordinate intervals accepted without subtraction overflow");
+    sample.geometryMin = savedMin; sample.geometryMax = savedMax;
     trace.samples[1] = sample;
     trace.sampleCount = 2; accepted = 4;
     aggregate = accepted;
     methodsMatch = original + aggregate;
     require(!validThumbTrace(trace), "rejects duplicate groups");
+    auto& duplicate = trace.samples[1];
+    ++duplicate.identity.left; ++duplicate.identity.right;
+    duplicate.geometryMin = duplicate.geometryMax = thumbSurfaceGeometry(duplicate.identity);
+    require(!validThumbTrace(trace), "different positions with duplicate semantic keys rejected");
     trace.sampleCount = 1; accepted = 3; trace.capacityDrops = 1;
     require(!validThumbTrace(trace), "capacity drops require full buffer");
     for (DWORD i = 1; i < thumbSurfaceCapacity; ++i) {
         trace.samples[i] = sample;
         trace.samples[i].calls = 1;
-        trace.samples[i].identity.right += static_cast<LONG>(i);
+        trace.samples[i].identity.deviceOffsetX += static_cast<double>(i);
     }
     trace.sampleCount = static_cast<DWORD>(thumbSurfaceCapacity); accepted = thumbSurfaceCapacity + 2;
     aggregate = accepted;
@@ -214,7 +233,11 @@ void testTrace()
     require(validThumbTrace(trace), "full capture accounts for exact capacity drops");
     --accepted;
     require(!validThumbTrace(trace), "aggregate accepted counts must match rows and loss");
-    ++accepted; trace.version = 3;
+    ++accepted; trace.version = 4;
+    require(!validThumbTrace(trace), "rejects version 4 payload");
+    trace.size = 18768;
+    require(!validThumbTrace(trace), "rejects legacy version 4 payload size");
+    trace.size = sizeof(trace); trace.version = 3;
     require(!validThumbTrace(trace), "rejects same-size version 3 payload");
     trace.version = 2; trace.size = 18640;
     require(!validThumbTrace(trace), "rejects version 2 payload");
@@ -325,11 +348,12 @@ void testImages(const std::wstring& diagnostic, const std::wstring& normal)
         const auto mapped = GetModuleHandleW(diagnostic.c_str());
         const auto run = mapped ? reinterpret_cast<ULONG_PTR>(GetProcAddress(mapped, thumbSurfaceRunExport)) : 0;
         require(run && thumbMappedRun(GetCurrentProcess(), image, theme) == run,
-                "mapped diagnostic v10 and probe v4 exports agree with trusted PE");
+                "mapped diagnostic v10 and probe v5 exports agree with trusted PE");
         require(!GetProcAddress(mapped, "RunThumbSurfaceProbeV1") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV1") &&
                 !GetProcAddress(mapped, "RunThumbSurfaceProbeV2") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV2") &&
-                !GetProcAddress(mapped, "RunThumbSurfaceProbeV3") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV3"),
-                "diagnostic DLL advertises only probe v4");
+                !GetProcAddress(mapped, "RunThumbSurfaceProbeV3") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV3") &&
+                !GetProcAddress(mapped, "RunThumbSurfaceProbeV4") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV4"),
+                "diagnostic DLL advertises only probe v5");
         auto wrong = theme;
         ++wrong.size;
         require(!thumbMappedRun(GetCurrentProcess(), image, wrong), "wrong mapped image size rejected");

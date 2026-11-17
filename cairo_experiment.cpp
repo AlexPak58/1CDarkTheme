@@ -88,7 +88,7 @@ bool isExpandedTooltip(const ULONG_PTR* stack)
     const auto& renderer = tracePlatform->rendererReturn;
     if (address > stackTop || stackTop - address < renderer.stackOffset + sizeof(*stack)) return false;
     // Walk the verified fixed stack frames back to frame.dll's tooltip renderer.
-    for (const auto& entry : tracePlatform->graphicsReturns) {
+    for (const auto& entry : tracePlatform->graphics.returns) {
         const auto actual = stack[entry.stackOffset / sizeof(*stack)];
         if (actual != graphicsBase + entry.rva &&
             (!entry.alternateRva || actual != graphicsBase + entry.alternateRva)) return false;
@@ -132,7 +132,7 @@ void setSourceRgb(void* context, double red, double green, double blue)
 void setSourceRgba(void* context, double red, double green, double blue, double alpha)
 {
 #ifdef THEME_TOOLTIP_TRACE
-    const auto expectedReturn = tracePlatform->rgbaReturn;
+    const auto expectedReturn = tracePlatform->graphics.rgbaReturn;
 #else
     // grphcs+0x22D0 calls Cairo with the original ARGB split into four channels.
     constexpr auto expectedReturn = 0x2336;
@@ -178,7 +178,7 @@ DWORD resolveHooks()
     if (!platform || !matchesSha256(modulePath(frame), platform->rendererHash) ||
         !matchesSha256(modulePath(graphics), platform->graphicsHash)) return ERROR_REVISION_MISMATCH;
     tracePlatform = platform;
-    hooks[firstHook].offset = platform->rgbaSlot;
+    hooks[firstHook].offset = platform->graphics.rgbaSlot;
 #else
     if (IsDebuggerPresent() || !matchesSha256(modulePath(nullptr), exeHash) ||
         !matchesSha256(modulePath(frame), frameHash) ||

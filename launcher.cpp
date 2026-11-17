@@ -335,7 +335,7 @@ int wmain(int argc, wchar_t** argv)
     const std::wstring exe = std::filesystem::absolute(argv[1]).lexically_normal().wstring();
 #ifdef THEME_TOOLTIP_TRACE
     if (!findTooltipTracePlatform(exe)) {
-        std::fputs("Unsupported 1cv8.exe (expected 8.3.27.2325 or 8.5.1.1529 x64).\n", stderr);
+        std::fputs("Unsupported 1cv8.exe hash for tooltip-trace. See RESEARCH.md for supported builds.\n", stderr);
 #else
     if (!matchesSha256(exe, exeHash)) {
         std::fputs("Unsupported 1cv8.exe (expected 8.3.27.2325 x64).\n", stderr);

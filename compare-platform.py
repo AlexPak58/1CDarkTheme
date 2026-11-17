@@ -636,6 +636,87 @@ def search_grid_color_copy(rva, code, ranges, imports, palette, color_offset):
     return candidates[0] if len(candidates) == 1 else None
 
 
+def search_grid_paint_path(image, rva, code, ranges, imports, vtable, factory_tail, factory_end, old):
+    ro_rva, ro_size, _ = image.sections[b".rdata"]
+
+    def method(table, slot):
+        entry = table + slot
+        if not ro_rva <= entry <= ro_rva + ro_size - 8:
+            return 0
+        return image.read("Q", image.offset(entry)) - image.image_base
+
+    def body(start):
+        end = ranges.get(start, 0)
+        return code[start - rva:end - rva] if rva <= start < end <= rva + len(code) else b""
+
+    def target(match, group, base):
+        return base + match.end(group) + struct.unpack("<i", match[group])[0]
+
+    # The factory's wrapper begins 0x18 bytes before the control proper.
+    tables = list(re.finditer(rb"\x48\x8d\x05(.{4})\x48\x89\x83\x18\x01\x00\x00",
+                             code[factory_tail - rva:factory_end - rva], re.S))
+    if len(tables) != 1:
+        return None
+    window_table = target(tables[0], 1, factory_tail)
+    on_paint = method(window_table, 0xF8 if old else 0x130)
+    # Return from the Window subobject to the main control and dispatch drawing.
+    forward = re.search(rb"\x48\x8d\x8f\x00\xff\xff\xff\x48\x8b\xd3\x48\x8b\x01"
+                        rb"\x4c\x8d\x4c\x24\x30\x4c\x8d\x44\x24\x20\xff\x90(.{4})",
+                        body(on_paint), re.S)
+    if forward is None:
+        return None
+    wrapper = method(vtable, struct.unpack("<I", forward[1])[0])
+    delegate = re.search(rb"\xc7\x44\x24\x30\x64\x00\x00\x00\xc7\x44\x24\x28\x02\x00\x00\x00"
+                         rb"\xc7\x44\x24\x20\x01\x00\x00\x00\xff\x90(.{4})", body(wrapper), re.S)
+    if delegate is None:
+        return None
+    renderer = method(vtable, struct.unpack("<I", delegate[1])[0])
+    clip = (rb"\xff\x15(.{4})\x85\xc0\x74.")
+    if old:
+        fill = (rb"\x4c\x8b\xb7(.{4})\x44\x39\xaf.{4}\x75.\x48\x8b\x05(.{4})"
+                rb"\x8b\x08\xe8.{4}\x4c\x8b\xf0\x4d\x8b\xc6\x48\x8d\x55\xe7\x49\x8b\xcf\xe8(.{4})")
+    else:
+        fill = (rb"\x8b\x55\x77\x49\x8b\xcc\xe8(.{4})\x44\x8b\xc0"
+                rb"\x49\x8b\xd5\x49\x8b\xce\xff\x15(.{4})")
+    candidates = []
+    for match in re.finditer(clip + fill, body(renderer), re.S):
+        if imports.get(target(match, 1, renderer)) != "IntersectRect":
+            continue
+        helper = target(match, 4 if old else 2, renderer)
+        if old:
+            if (imports.get(target(match, 3, renderer)) != "?kPrintWhiteColor@wbase@@3KB"
+                    or not re.search(rb"\xc7\x44\x24\x30\x21\x00\xf0\x00.{8,16}\x41\xff\x93\xe8\x01\x00\x00",
+                                     body(helper), re.S)):
+                continue
+            field = struct.unpack("<I", match[2])[0]
+        else:
+            if imports.get(target(match, 3, renderer)) != "?fillSolidRect@wbase@@YAXPEAU_VDC@grphcs@@PEBUtagRECT@@K@Z":
+                continue
+            mode = re.search(rb"\x8b\x81.{4}\x48\x8b\xe9\x83\xe8\x03\x83\xf8\x02\x0f\x87(.{4})",
+                             body(helper), re.S)
+            if mode is None:
+                continue
+            # This branch has a separate unwind range in 8.5.
+            tail = target(mode, 1, helper)
+            fallback = re.search(rb"\x85\xd2\x75.\x48\x8b\x05(.{4})\x8b\x00"
+                                 rb"\x48\x8b\x4c\x24\x48\x48\x33\xcc\xe8.{4}\x48\x83\xc4\x60\x5d\xc3\x8b\x81(.{4})",
+                                 body(tail), re.S)
+            if fallback is None or imports.get(target(fallback, 1, tail)) != "?kPrintWhiteColor@wbase@@3KB":
+                continue
+            field = struct.unpack("<I", fallback[2])[0]
+        candidates.append({
+            "window_vtable": f"0x{window_table:X}",
+            "on_paint": f"0x{on_paint:X}",
+            "draw_wrapper": f"0x{wrapper:X}",
+            "renderer": f"0x{renderer:X}",
+            "clip_call": f"0x{renderer + match.start():X}",
+            "background_call": f"0x{renderer + match.end() - (5 if old else 6):X}",
+            "helper": f"0x{helper:X}",
+            "brush_offset" if old else "fallback_color_offset": f"0x{field:X}",
+        })
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def search_grid_candidates(image, rva, code):
     ranges = dict(image.function_ranges())
     imports = {slot: symbol for _, symbol, slot in image.imports()}
@@ -707,6 +788,9 @@ def search_grid_candidates(image, rva, code):
                                 image, rva, code, ranges, palette, assignment[2]),
                             "alternating_color_copy": search_grid_color_copy(
                                 rva, code, ranges, imports, palette, assignment[2]),
+                            "paint_path": search_grid_paint_path(
+                                image, rva, code, ranges, imports, vtable, rva + setup.end(),
+                                ranges[target], method_slot == 0x1C0),
                         }
 
 

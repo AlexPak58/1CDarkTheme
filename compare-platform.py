@@ -677,6 +677,43 @@ def spreadsheet_grid_strip_candidates(image):
             }
 
 
+def search_form_loaders(image):
+    rva, code = image.text()
+    ro_rva, ro_size, ro_offset = image.sections.get(b".rdata", (0, 0, 0))
+    ro_data = image.data[ro_offset:ro_offset + ro_size]
+    functions = sorted(image.function_ranges())
+    starts = [start for start, _ in functions]
+    form_slot = bytes.fromhex("4C 8B 81 C8 01 00 00 48 8B D3 48 8B C8 41 FF D0")
+    names_by_address = {
+        ro_rva + hit.start(): name
+        for name in ("fnrresults.f", "fnrtreesearch.f")
+        for hit in re.finditer(re.escape((name + "\0").encode("utf-16-le")), ro_data)
+    }
+    seen = set()
+    for ref in re.finditer(rb"[\x48\x4c]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d](.{4})",
+                           code, re.DOTALL):
+        address = rva + ref.end() + struct.unpack("<i", ref[1])[0]
+        name = names_by_address.get(address)
+        site = rva + ref.start()
+        index = bisect_right(starts, site) - 1
+        if name is None or index < 0:
+            continue
+        start, end = functions[index]
+        if site >= end or (name, start) in seen:
+            continue
+        call = code.find(form_slot, ref.end(), end - rva)
+        if call < 0:
+            continue
+        seen.add((name, start))
+        yield {
+            "resource": name,
+            "resource_name_rva": f"0x{address:X}",
+            "resource_reference": f"0x{site:X}",
+            "function": f"0x{start:X}",
+            "window_call": f"0x{rva + call + len(form_slot) - 3:X}",
+        }
+
+
 def compare(directory, signatures):
     result = {"directory": str(directory), "clients": [], "modules": {}}
     for name in ("1cv8.exe", "1cv8c.exe"):
@@ -752,6 +789,13 @@ def compare(directory, signatures):
             "sha256": image.sha256(),
             "spreadsheet_grid_strip_candidates": list(spreadsheet_grid_strip_candidates(image)),
             "spreadsheet_outline_dispatch_candidates": list(spreadsheet_outline_dispatch_candidates(image)),
+        }
+    path = directory / "frntend.dll"
+    if path.is_file():
+        image = Image(path)
+        result["modules"]["frntend.dll"] = {
+            "sha256": image.sha256(),
+            "search_form_loaders": list(search_form_loaders(image)),
         }
     return result
 

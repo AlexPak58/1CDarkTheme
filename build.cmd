@@ -58,6 +58,8 @@ if not exist "%THEME_BUILD_DIR%" mkdir "%THEME_BUILD_DIR%"
 if not exist "%THEME_BUILD_DIR%\" goto failed
 cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 %THEME_DLL_FLAGS% /LD "%THEME_SOURCE%" /Fo"%THEME_BUILD_DIR%\theme.obj" /Fe"%THEME_BUILD_DIR%\tree-theme.dll" bcrypt.lib dwmapi.lib user32.lib
 if errorlevel 1 goto failed
+cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /LD enterprise.cpp /Fo"%THEME_BUILD_DIR%\enterprise.obj" /Fe"%THEME_BUILD_DIR%\enterprise-theme.dll" bcrypt.lib user32.lib
+if errorlevel 1 goto failed
 cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 %THEME_LAUNCHER_FLAGS% launcher.cpp /Fo"%THEME_BUILD_DIR%\launcher.obj" /Fe"%THEME_BUILD_DIR%\tree-theme-run.exe" bcrypt.lib user32.lib
 if errorlevel 1 goto failed
 if /i "%~2"=="settings" (

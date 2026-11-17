@@ -65,6 +65,8 @@ inline constexpr auto frameHash =
 inline constexpr auto graphicsHash =
     L"C2738571BF193776E5A4227FAD46F410E43595A1AEC0160BBE30A5564966344C";
 
+inline constexpr auto thinClientHash = L"1FC058B6D55DC401870D5AE6BBAE8093BA759467E12806380B184951B2CB4A04";
+
 inline std::wstring modulePath(HMODULE module)
 {
     std::wstring path(32768, L'\0');

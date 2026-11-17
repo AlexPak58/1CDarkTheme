@@ -65,6 +65,7 @@ public partial class MainWindow : Window
         SaveButton.IsEnabled = _store is not null;
         RefreshPresets(Palette.DefaultName);
         ZoneList.SelectedIndex = 0;
+        if (Environment.GetCommandLineArgs().Contains("--enterprise")) ClientMode.SelectedIndex = 2;
         if (storeError is not null)
             ShowStatus(storeError);
     }
@@ -121,12 +122,13 @@ public partial class MainWindow : Window
         if (ZoneList.SelectedItem is not ListBoxItem { Tag: Zone zone })
             return;
 
-        ZoneTitle.Text = zone.Label;
+        ZoneTitle.Text = ClientMode.SelectedIndex > 0 && zone.Bit == 8 ? "Текст, ссылки и выделение" : zone.Label;
         ColorRows.Children.Clear();
         _visibleInputs.Clear();
         for (var i = 0; i < zone.Fields.Length; i++)
         {
             var colorIndex = zone.Offset + i;
+            if (ClientMode.SelectedIndex > 0 && (colorIndex == 5 || colorIndex == 6)) continue;
             var fieldName = zone.Fields[i];
             var label = new TextBlock { Text = fieldName, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
             var input = new TextBox { Text = _colors[colorIndex].Input, Margin = new Thickness(8, 0, 0, 0),
@@ -298,9 +300,29 @@ public partial class MainWindow : Window
         return dialog.ShowDialog() == true ? input.Text.Trim() : null;
     }
 
+    private void ClientModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (PlatformPath is null || LaunchButton is null) return;
+        var enterprise = ClientMode.SelectedIndex > 0;
+        PlatformPath.Text = @"C:\Program Files\1cv8\8.3.27.2130\bin\" +
+            (ClientMode.SelectedIndex == 2 ? "1cv8c.exe" : "1cv8.exe");
+        foreach (ListBoxItem item in ZoneList.Items)
+        {
+            var zone = (Zone)item.Tag;
+            item.Visibility = !enterprise || zone.Bit is 4 or 8 or 16 ? Visibility.Visible : Visibility.Collapsed;
+            _checks[zone.Bit].Visibility = enterprise ? Visibility.Collapsed : Visibility.Visible;
+            ((TextBlock)((DockPanel)item.Content).Children[1]).Text = enterprise && zone.Bit == 8 ? "Текст, ссылки и выделение" : zone.Label;
+        }
+        ZoneList.SelectedItem = ZoneList.Items.Cast<ListBoxItem>().First(item => ((Zone)item.Tag).Bit == (enterprise ? 16 : 1));
+        DisplaySelectedZone();
+        if (ModeHelp is not null) ModeHelp.Text = enterprise ? "Предварительная версия. Явные нейтральные цвета конфигурации тоже могут измениться. HTML и изображения сохраняют своё оформление." : "Для выпадающих меню можно настроить фон, полосу значков, текст и горячие клавиши. Цвет подсветки пункта задаёт платформа.";
+        LaunchButton.Content = enterprise ? "Запустить Предприятие" : "Запустить Конфигуратор";
+        ShowStatus(enterprise ? "Такси: тема применяется целиком. Выберите пресет или настройте цвета." : "Пресет: " + (PresetBox.SelectedItem as Preset)?.Name);
+    }
+
     private void BrowsePlatform(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Title = "Выберите 1cv8.exe", Filter = "Платформа 1С (1cv8.exe)|1cv8.exe",
+        var dialog = new OpenFileDialog { Title = "Выберите клиент 1С", Filter = "Клиенты 1С|1cv8.exe;1cv8c.exe",
                                           CheckFileExists = true, FileName = "1cv8.exe" };
         if (dialog.ShowDialog(this) == true)
             PlatformPath.Text = dialog.FileName;
@@ -313,9 +335,10 @@ public partial class MainWindow : Window
             return;
         var platform = PlatformPath.Text.Trim().Trim('"');
         if (!Path.IsPathFullyQualified(platform) || !File.Exists(platform) ||
-            !string.Equals(Path.GetFileName(platform), "1cv8.exe", StringComparison.OrdinalIgnoreCase))
+            !(string.Equals(Path.GetFileName(platform), "1cv8.exe", StringComparison.OrdinalIgnoreCase) ||
+              (ClientMode.SelectedIndex > 0 && string.Equals(Path.GetFileName(platform), "1cv8c.exe", StringComparison.OrdinalIgnoreCase))))
         {
-            ShowStatus("Выберите файл 1cv8.exe; нужен полный путь.");
+            ShowStatus("Выберите клиент 1С; нужен полный путь.");
             PlatformPath.Focus();
             return;
         }
@@ -338,6 +361,7 @@ public partial class MainWindow : Window
         }
 
         var mask = _mask;
+        var clientLabel = ClientMode.SelectedIndex > 0 ? "Предприятие" : "Конфигуратор";
         var start = new ProcessStartInfo(launcher)
         {
             WorkingDirectory = AppContext.BaseDirectory,
@@ -350,9 +374,10 @@ public partial class MainWindow : Window
         start.ArgumentList.Add(target);
         start.ArgumentList.Add("--palette");
         start.ArgumentList.Add(Palette.Encode(mask, colors));
+        if (ClientMode.SelectedIndex > 0) start.ArgumentList.Add("--enterprise");
 
         LaunchButton.IsEnabled = false;
-        ShowStatus("Запускается новый Конфигуратор. Если появится окно входа, войдите в базу.");
+        ShowStatus($"Запускается {clientLabel}. Если появится окно входа, войдите в базу.");
         try
         {
             using var process = Process.Start(start) ?? throw new InvalidOperationException("Windows не создала процесс лаунчера.");
@@ -360,7 +385,7 @@ public partial class MainWindow : Window
             var stderr = process.StandardError.ReadToEndAsync();
             await Task.WhenAll(stdout, stderr, process.WaitForExitAsync());
             if (process.ExitCode == 0)
-                ShowStatus(mask == 0 ? "Конфигуратор запущен со штатными цветами." : "Конфигуратор запущен, палитра применена.");
+                ShowStatus(mask == 0 ? $"{clientLabel}: штатные цвета." : $"{clientLabel}: палитра применена.");
             else
             {
                 var detail = (stderr.Result.Length > 0 ? stderr.Result : stdout.Result).Trim();

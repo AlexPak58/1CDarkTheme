@@ -289,7 +289,7 @@ BOOL CALLBACK findProfileWindow(HWND window, LPARAM param)
 
 int applyLaunchProfile(HANDLE child, DWORD pid, const std::wstring& dll, const ThemeProfile& profile)
 {
-    std::printf("Started Configurator PID %lu.\n", pid);
+    std::printf("Started 1C client PID %lu.\n", pid);
     std::fflush(stdout);
     if (!profile.zones) return 0;
 
@@ -421,7 +421,13 @@ int wmain(int argc, wchar_t** argv)
         return 2;
     }
 #endif
+    const bool enterpriseMode = argc > 3 && std::wstring_view(argv[argc - 1]) == L"--enterprise";
+    if (enterpriseMode) --argc;
     const bool profileMode = argc == 5 && std::wstring_view(argv[3]) == L"--palette";
+    if (enterpriseMode && !profileMode) {
+        std::fputs("Enterprise mode requires --palette <profile> before --enterprise.\n",stderr);
+        return 2;
+    }
     ThemeProfile profile;
     if (profileMode && !parseProfile(argv[4], profile)) {
         std::fputs("Invalid palette. Expected a zone mask and 31 six-digit RGB colors (25, 29 or 30 for legacy palettes).\n", stderr);
@@ -461,15 +467,15 @@ int wmain(int argc, wchar_t** argv)
     if (!findOutlineTracePlatform(exe, designer)) {
         std::fputs("Unsupported client hash or mode for spreadsheet tracing. See RESEARCH.md.\n", stderr);
 #else
-    if (!matchesSha256(exe, exeHash)) {
+    if (!matchesSha256(exe, exeHash) && !(enterpriseMode && matchesSha256(exe, thinClientHash))) {
         std::fputs("Unsupported 1cv8.exe (expected 8.3.27.2130 x64).\n", stderr);
 #endif
         return 2;
     }
     const auto directory = std::filesystem::path(modulePath(nullptr)).parent_path();
-    const std::wstring dll = (directory / L"tree-theme.dll").wstring();
+    const std::wstring dll = (directory / (enterpriseMode ? L"enterprise-theme.dll" : L"tree-theme.dll")).wstring();
     if ((!profileMode || profile.zones) && !std::filesystem::is_regular_file(dll)) {
-        std::fputs("tree-theme.dll is missing beside the launcher.\n", stderr);
+        std::fputs("Theme DLL is missing beside the launcher.\n", stderr);
         return 2;
     }
 
@@ -486,7 +492,7 @@ int wmain(int argc, wchar_t** argv)
     if (designer) mode = L" DESIGNER ";
 #endif
 #else
-    const wchar_t* mode = L" DESIGNER ";
+    const wchar_t* mode = enterpriseMode ? L" ENTERPRISE /iTaxi " : L" DESIGNER ";
 #endif
     std::wstring command = L"\"" + exe + L"\"" + mode + (std::filesystem::path(argv[2]).is_absolute() ? L"/F\"" : L"/S\"") + std::wstring(argv[2]) + L"\" /WA+";
     STARTUPINFOW startup{};
@@ -507,14 +513,14 @@ int wmain(int argc, wchar_t** argv)
 #elif defined(THEME_FORM_LINE_TRACE)
     std::printf("Started Enterprise PID %lu. Open the target form first.\n", process.dwProcessId);
 #elif defined(THEME_SEARCH_RESULTS_TRACE)
-    std::printf("Started Configurator PID %lu. Enable the trace before running metadata search.\n",
+    std::printf("Started 1C client PID %lu. Enable the trace before running metadata search.\n",
                 process.dwProcessId);
 #else
-    std::printf("Started Configurator PID %lu.\n", process.dwProcessId);
+    std::printf("Started 1C client PID %lu.\n", process.dwProcessId);
 #endif
     std::puts("Enter e to enable the trace, d to disable it, t to read and reset, or q to quit.");
 #else
-    std::printf("Started Configurator PID %lu. Open the target tree first.\n", process.dwProcessId);
+    std::printf("Started 1C client PID %lu. Open the target tree first.\n", process.dwProcessId);
     std::puts("Enter e to enable, d to disable, q to close this launcher.");
 #endif
 #ifdef THEME_BENCHMARK

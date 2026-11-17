@@ -32,6 +32,12 @@ if /i "%~2"=="frame-probe" (
     set "THEME_DLL_NAME=local-frame-probe.dll"
     set "THEME_LAUNCHER_NAME=frame-probe-run.exe"
 )
+if /i "%~2"=="scroller-probe" (
+    set "THEME_SOURCE=scroller_identity_probe.cpp"
+    set "THEME_LAUNCHER_SOURCE=scroller_probe_launcher.cpp"
+    set "THEME_DLL_NAME=scroller-identity-probe.dll"
+    set "THEME_LAUNCHER_NAME=scroller-probe-run.exe"
+)
 if /i "%~2"=="cairo" (
     set "THEME_SOURCE=cairo_experiment.cpp"
     set "THEME_LAUNCHER_FLAGS=/DTHEME_BENCHMARK"

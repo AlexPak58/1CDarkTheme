@@ -18,6 +18,7 @@ PROPERTY_PAINT_RETURN = 0x4F60ED
 SEARCH_LABEL_RENDER_RETURN = 0x5BD070
 SEARCH_LABEL_CLASS_ID = uuid.UUID("4f2defd2-5243-4166-b7f2-3e7ffc5f6394").bytes_le
 SEARCH_GRID_CLASS_ID = uuid.UUID("2dd8e24f-ea53-4aab-a45e-a973eb59375f").bytes_le
+SEARCH_RESULTS_TOOLBAR_CLASS_ID = uuid.UUID("12735fb0-15fd-11d4-9403-008048da11f9").bytes_le
 SEARCH_LABEL_LAYOUTS = {
     (0xC20, 0xC38): (0x218, 0x110),
     (0xC68, 0xC80): (0x238, 0x120),
@@ -699,6 +700,16 @@ def compare(directory, signatures):
             summary["search_label_candidates"] = list(search_label_candidates(
                 image, rva, code, windows["search_label_render"]))
             summary["search_grid_candidates"] = list(search_grid_candidates(image, rva, code))
+            summary["search_results_toolbar_factories"] = [
+                {
+                    "registry_record": f"0x{record:X}",
+                    "factory": f"0x{factory:X}",
+                    "zero_argument_target": f"0x{targets[0]:X}",
+                    "nonzero_argument_target": f"0x{targets[1]:X}",
+                }
+                for record, factory, targets in registered_factories(
+                    image, rva, code, SEARCH_RESULTS_TOOLBAR_CLASS_ID)
+            ]
         elif name == "grphcs.dll":
             cairo_imports = {slot: symbol for dll, symbol, slot in image.imports() if dll == "cairo.dll"}
             imports = {slot: symbol for slot, symbol in cairo_imports.items()

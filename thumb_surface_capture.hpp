@@ -82,17 +82,18 @@ inline Stage checkCache(panel_detail::Reader& r, ULONG_PTR h, ULONG_PTR componen
     cache.gate = original ? CacheCounter::OriginalPair : originalDraw ? CacheCounter::AlternateRasterPair :
         originalRaster ? CacheCounter::AlternateDrawPair : CacheCounter::AlternateBothPair;
 
-    // Only the four pinned pairs warrant a guarded method-slot read. Alternate
-    // pairs are counted even when the methods match; only the original is admitted.
+    // The original pair and the observed aggregate pair continue to the existing
+    // state and geometry checks. Mixed pairs only contribute diagnostics.
+    const bool admittedPair = originalDraw == originalRaster;
     if (!r.read(qiTable, 0x18, drawMethod) || !r.read(rasterTable, 0x18, rasterMethod)) {
         cache.methods = CacheCounter::MethodsReadFailure;
-        return original ? Stage::ReadFailure : Stage::Cache;
+        return admittedPair ? Stage::ReadFailure : Stage::Cache;
     }
     const bool drawMatches = drawMethod == imageUi + 0x8FE0;
     const bool rasterMatches = rasterMethod == imageUi + 0x6340;
     cache.methods = drawMatches ? (rasterMatches ? CacheCounter::MethodsMatch : CacheCounter::WrongRasterMethod) :
         (rasterMatches ? CacheCounter::WrongDrawMethod : CacheCounter::WrongBothMethods);
-    return original && drawMatches && rasterMatches ? Stage::Accepted : Stage::Cache;
+    return admittedPair && drawMatches && rasterMatches ? Stage::Accepted : Stage::Cache;
 }
 
 inline Stage locatePaint(ULONG_PTR h, const Images& b, ThumbSurfaceIdentity& id, CacheObservation& cache)

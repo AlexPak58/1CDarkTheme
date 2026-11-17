@@ -175,6 +175,7 @@ void testTrace()
     }
     const auto count = [&](Counter counter) -> ULONGLONG& { return trace.cacheCounters[static_cast<size_t>(counter)]; };
     auto& original = count(Counter::OriginalPair);
+    auto& aggregate = count(Counter::AlternateBothPair);
     auto& methodsMatch = count(Counter::MethodsMatch);
     const auto thumbPresent = thumbStage(trace, Stage::ThumbPresent);
     original = methodsMatch = thumbPresent;
@@ -183,10 +184,11 @@ void testTrace()
     auto& sample = trace.samples[0];
     auto& id = sample.identity;
     trace.sampleCount = 1; accepted = sample.calls = 2;
-    original = methodsMatch = thumbPresent + accepted;
+    aggregate = accepted;
+    methodsMatch = original + aggregate;
     id = {0xABEDB0, 0x3CA78, 0x50, 0x1A030, 1, 5, 0, 2, 1, 1, 0, 0,
           0, 0, 20, 50, 1, 2, 10, 15, 0, 1, 13, 17, 52, 0, 1, 1, 0, 0};
-    require(validThumbTrace(trace), "valid horizontal image metadata accepted");
+    require(validThumbTrace(trace), "valid horizontal image metadata from the aggregate pair accepted");
     id.enabled = 0; require(!validThumbTrace(trace), "cache state must match enabled and interactive flags"); id.enabled = 1;
     id.drawReturnRva = 0x19AF5; require(!validThumbTrace(trace), "piece must match orientation"); id.drawReturnRva = 0x1A030;
     id.deviceOffsetX = std::numeric_limits<double>::infinity();
@@ -196,7 +198,8 @@ void testTrace()
     id.scrollerTableRva = 0x3CD00; require(!validThumbTrace(trace), "rejects mismatched owners"); id.scrollerTableRva = 0x3CA78;
     trace.samples[1] = sample;
     trace.sampleCount = 2; accepted = 4;
-    original = methodsMatch = thumbPresent + accepted;
+    aggregate = accepted;
+    methodsMatch = original + aggregate;
     require(!validThumbTrace(trace), "rejects duplicate groups");
     trace.sampleCount = 1; accepted = 3; trace.capacityDrops = 1;
     require(!validThumbTrace(trace), "capacity drops require full buffer");
@@ -206,11 +209,14 @@ void testTrace()
         trace.samples[i].identity.right += static_cast<LONG>(i);
     }
     trace.sampleCount = static_cast<DWORD>(thumbSurfaceCapacity); accepted = thumbSurfaceCapacity + 2;
-    original = methodsMatch = thumbPresent + accepted;
+    aggregate = accepted;
+    methodsMatch = original + aggregate;
     require(validThumbTrace(trace), "full capture accounts for exact capacity drops");
     --accepted;
     require(!validThumbTrace(trace), "aggregate accepted counts must match rows and loss");
-    ++accepted; trace.version = 2;
+    ++accepted; trace.version = 3;
+    require(!validThumbTrace(trace), "rejects same-size version 3 payload");
+    trace.version = 2; trace.size = 18640;
     require(!validThumbTrace(trace), "rejects version 2 payload");
     trace.version = thumbSurfaceProbeVersion;
     trace.size = 18640;
@@ -256,30 +262,32 @@ void testCacheCounters()
     for (const auto& [counter, key] : cacheKeys)
         require(std::string_view(thumbCacheNames[static_cast<size_t>(counter)]) == key, "cache diagnostic maps to its JSON key");
 
-    // Four basic rejections, three alternate pairs, one unknown pair and one
-    // original with mismatched methods. The remaining original pair failed a read.
-    cache = 9;
-    readFailures = 3;
+    // Four basic rejections, two mixed pairs, one unknown pair and one method
+    // mismatch on an admitted pair. Two admitted pairs failed method reads.
+    cache = 8;
+    readFailures = 4;
     for (const auto counter : {Counter::InputsReadFailure, Counter::NullCache, Counter::InvalidDrawQi,
                               Counter::DrawingObjectMismatch, Counter::NullRasterQi, Counter::TablesReadFailure,
                               Counter::AlternateDrawPair, Counter::AlternateRasterPair, Counter::AlternateBothPair,
                               Counter::UnknownPair, Counter::WrongDrawMethod, Counter::WrongRasterMethod}) count(counter) = 1;
     count(Counter::OriginalPair) = 2;
     count(Counter::MethodsReadFailure) = 3;
-    // One alternate mismatch and two alternate read failures. The remaining
-    // method read failure necessarily came from the original pair.
+    // One mixed mismatch and one mixed read failure. The other two method read
+    // failures necessarily came from admitted pairs.
     require(validThumbTrace(trace), "consistent cache gate, pair and method counts admitted");
     --cache;
-    require(!validThumbTrace(trace), "stage must account for the reported original method mismatch or original read failure");
+    require(!validThumbTrace(trace), "stage must account for the admitted method mismatch or read failure");
     ++cache;
     --readFailures;
-    require(!validThumbTrace(trace), "original method read failures must fit the stage read failure budget");
+    require(!validThumbTrace(trace), "admitted method read failures must fit the stage read failure budget");
     ++readFailures;
     ++count(Counter::MethodsMatch);
     require(!validThumbTrace(trace), "known pairs and method outcomes have equal totals");
     --count(Counter::MethodsMatch);
     count(Counter::OriginalPair) = (std::numeric_limits<ULONGLONG>::max)();
-    require(!validThumbTrace(trace), "overflowing known pair count rejected");
+    require(!validThumbTrace(trace), "overflowing admitted pair count rejected");
+    --count(Counter::OriginalPair);
+    require(!validThumbTrace(trace), "overflowing total known pair count rejected");
 
     trace = {};
     trace.snapshotError = ERROR_TIMEOUT;
@@ -317,10 +325,11 @@ void testImages(const std::wstring& diagnostic, const std::wstring& normal)
         const auto mapped = GetModuleHandleW(diagnostic.c_str());
         const auto run = mapped ? reinterpret_cast<ULONG_PTR>(GetProcAddress(mapped, thumbSurfaceRunExport)) : 0;
         require(run && thumbMappedRun(GetCurrentProcess(), image, theme) == run,
-                "mapped diagnostic v10 and probe v3 exports agree with trusted PE");
+                "mapped diagnostic v10 and probe v4 exports agree with trusted PE");
         require(!GetProcAddress(mapped, "RunThumbSurfaceProbeV1") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV1") &&
-                !GetProcAddress(mapped, "RunThumbSurfaceProbeV2") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV2"),
-                "diagnostic DLL advertises only probe v3");
+                !GetProcAddress(mapped, "RunThumbSurfaceProbeV2") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV2") &&
+                !GetProcAddress(mapped, "RunThumbSurfaceProbeV3") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV3"),
+                "diagnostic DLL advertises only probe v4");
         auto wrong = theme;
         ++wrong.size;
         require(!thumbMappedRun(GetCurrentProcess(), image, wrong), "wrong mapped image size rejected");

@@ -243,50 +243,52 @@ bool validThumbCacheCounters(const ThumbSurfaceTrace& trace)
         return true;
     };
 
-    // Every early predicate rejection, unknown pair and alternate pair is Cache.
-    // Any remaining Cache calls must be original-pair method mismatches.
-    auto originalWrong = thumbStage(trace, Stage::Cache);
+    // Early predicate rejections, unknown pairs and mixed pairs are Cache.
+    // The remaining Cache calls are method mismatches on admitted pairs.
+    auto admittedWrong = thumbStage(trace, Stage::Cache);
     for (const auto counter : {Counter::NullCache, Counter::InvalidDrawQi, Counter::DrawingObjectMismatch,
                               Counter::NullRasterQi, Counter::UnknownPair}) {
-        if (!subtract(originalWrong, count(counter))) return false;
+        if (!subtract(admittedWrong, count(counter))) return false;
     }
-    const auto beforeAlternates = originalWrong;
-    for (const auto counter : {Counter::AlternateDrawPair, Counter::AlternateRasterPair, Counter::AlternateBothPair}) {
-        if (!subtract(originalWrong, count(counter))) return false;
+    const auto beforeMixed = admittedWrong;
+    for (const auto counter : {Counter::AlternateDrawPair, Counter::AlternateRasterPair}) {
+        if (!subtract(admittedWrong, count(counter))) return false;
     }
-    const auto alternates = beforeAlternates - originalWrong;
-    auto originalRemaining = count(Counter::OriginalPair);
-    if (!subtract(originalRemaining, originalWrong) ||
-        count(Counter::OriginalPair) > (std::numeric_limits<ULONGLONG>::max)() - alternates)
-        return false;
+    const auto mixedPairs = beforeMixed - admittedWrong;
+    constexpr auto maxCount = (std::numeric_limits<ULONGLONG>::max)();
+    const auto originalPairs = count(Counter::OriginalPair), aggregatePairs = count(Counter::AlternateBothPair);
+    if (originalPairs > maxCount - aggregatePairs) return false;
+    const auto admittedPairs = originalPairs + aggregatePairs;
+    auto admittedRemaining = admittedPairs;
+    if (!subtract(admittedRemaining, admittedWrong) || admittedPairs > maxCount - mixedPairs) return false;
 
     // Each known pair records exactly one method outcome, without multiplying
     // or summing the untrusted counters before checking their bounds.
-    auto remaining = count(Counter::OriginalPair) + alternates;
+    auto remaining = admittedPairs + mixedPairs;
     const auto knownPairs = remaining;
     for (const auto counter : {Counter::WrongDrawMethod, Counter::WrongRasterMethod, Counter::WrongBothMethods}) {
         if (!subtract(remaining, count(counter))) return false;
     }
-    auto alternateWrong = knownPairs - remaining;
-    if (!subtract(alternateWrong, originalWrong) || alternateWrong > alternates ||
+    auto mixedWrong = knownPairs - remaining;
+    if (!subtract(mixedWrong, admittedWrong) || mixedWrong > mixedPairs ||
         !subtract(remaining, count(Counter::MethodsReadFailure)) || remaining != count(Counter::MethodsMatch)) return false;
 
-    const auto alternateReadLimit = alternates - alternateWrong;
+    const auto mixedReadLimit = mixedPairs - mixedWrong;
     const auto methodsRead = count(Counter::MethodsReadFailure);
-    const auto originalReadMin = methodsRead > alternateReadLimit ? methodsRead - alternateReadLimit : 0;
+    const auto admittedReadMin = methodsRead > mixedReadLimit ? methodsRead - mixedReadLimit : 0;
     auto readFailures = thumbStage(trace, Stage::ReadFailure);
     if (!subtract(readFailures, count(Counter::InputsReadFailure)) ||
-        !subtract(readFailures, count(Counter::TablesReadFailure)) || !subtract(readFailures, originalReadMin) ||
-        !subtract(originalRemaining, originalReadMin)) return false;
+        !subtract(readFailures, count(Counter::TablesReadFailure)) || !subtract(readFailures, admittedReadMin) ||
+        !subtract(admittedRemaining, admittedReadMin)) return false;
 
-    // These stages can only occur after an admitted original pair.
+    // These stages can only occur after an admitted pair with matching methods.
     for (const auto stage : {Stage::State, Stage::ThumbPresent, Stage::SurfaceError, Stage::SurfaceType,
                              Stage::InvalidMetrics, Stage::Accepted}) {
-        if (!subtract(originalRemaining, thumbStage(trace, stage))) return false;
+        if (!subtract(admittedRemaining, thumbStage(trace, stage))) return false;
     }
     // Geometry and guarded reads also reject after the cache gate, but share
     // stage counters with earlier checks. Those counters bound the remainder.
-    return originalRemaining <= readFailures || originalRemaining - readFailures <= thumbStage(trace, Stage::Owner);
+    return admittedRemaining <= readFailures || admittedRemaining - readFailures <= thumbStage(trace, Stage::Owner);
 }
 
 bool validThumbTrace(const ThumbSurfaceTrace& trace)

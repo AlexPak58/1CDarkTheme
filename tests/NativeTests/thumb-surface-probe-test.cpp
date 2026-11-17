@@ -342,13 +342,18 @@ void testCacheDiagnostics(Fixture& f)
     };
 
     tables(0x14218, 0x13D08);
-    expect(Stage::Accepted, Counter::OriginalPair, Counter::MethodsMatch, "only the original known pair reaches Cairo");
+    expect(Stage::Accepted, Counter::OriginalPair, Counter::MethodsMatch, "original known pair reaches Cairo");
     tables(0x14090, 0x13D08);
     expect(Stage::Cache, Counter::AlternateDrawPair, Counter::MethodsMatch, "alternate draw pair matches methods but never reaches Cairo");
     tables(0x14218, 0x13C80);
     expect(Stage::Cache, Counter::AlternateRasterPair, Counter::MethodsMatch, "alternate raster pair matches methods but never reaches Cairo");
     tables(0x14090, 0x13C80);
-    expect(Stage::Cache, Counter::AlternateBothPair, Counter::MethodsMatch, "dual alternate pair matches methods but never reaches Cairo");
+    expect(Stage::Accepted, Counter::AlternateBothPair, Counter::MethodsMatch, "confirmed aggregate pair reaches Cairo");
+    f.state(1, 1, 0, 0, 2);
+    expect(Stage::State, Counter::AlternateBothPair, Counter::MethodsMatch, "aggregate pair still requires matching cache state");
+    tables(0x14090, 0x13C80);
+    put(f.stack, paintFrame + 0xD8, RECT{});
+    expect(Stage::Owner, Counter::AlternateBothPair, Counter::MethodsMatch, "aggregate pair still requires valid thumb geometry");
 
     auto* guard = static_cast<BYTE*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE | PAGE_GUARD));
     check(guard != nullptr, "allocate unknown-table guard fixture");
@@ -385,7 +390,9 @@ void testCacheDiagnostics(Fixture& f)
     expect(Stage::ReadFailure, Counter::OriginalPair, Counter::MethodsReadFailure, "original method read failure keeps ReadFailure");
     tables(0x14090, 0x13C80);
     deniedQuery = reinterpret_cast<LPCVOID>(iu + 0x14090 + 0x18);
-    expect(Stage::Cache, Counter::AlternateBothPair, Counter::MethodsReadFailure, "alternate method read failure keeps Cache");
+    expect(Stage::ReadFailure, Counter::AlternateBothPair, Counter::MethodsReadFailure, "aggregate method read failure reports ReadFailure");
+    tables(0x14090, 0x13D08);
+    expect(Stage::Cache, Counter::AlternateDrawPair, Counter::MethodsReadFailure, "mixed method read failure keeps Cache");
     deniedQuery = nullptr;
 
     f.route();
@@ -396,6 +403,9 @@ void testCacheDiagnostics(Fixture& f)
     expect(Stage::Cache, Counter::OriginalPair, Counter::WrongRasterMethod, "wrong raster method separated");
     ++(*f.imageUi)[(0x14218 + 0x18) / 8];
     expect(Stage::Cache, Counter::OriginalPair, Counter::WrongBothMethods, "both wrong methods separated");
+    tables(0x14090, 0x13C80);
+    ++(*f.imageUi)[(0x13C80 + 0x18) / 8];
+    expect(Stage::Cache, Counter::AlternateBothPair, Counter::WrongRasterMethod, "aggregate pair still requires exact methods");
 
     tables(0x14090, 0x13C80);
     ++f.window[0xB8 / 8];
@@ -407,7 +417,9 @@ void testCacheDiagnostics(Fixture& f)
     deadline.store(0);
     ThumbSurfaceTrace snapshot;
     check(copySamples(snapshot) == ERROR_SUCCESS && snapshot.cacheCounters == observations.cacheCounters &&
-        snapshot.sampleCount == 1 && snapshot.samples[0].calls == 1, "snapshot retains diagnostics and only the original sample");
+        snapshot.sampleCount == 1 && snapshot.samples[0].calls == 2 &&
+        snapshot.samples[0].identity.width == f.surface.width && snapshot.samples[0].identity.height == f.surface.height &&
+        snapshot.samples[0].identity.stride == f.surface.stride, "snapshot aggregates metadata from both admitted pairs");
     observations = {};
     f.binding.api.status = f.api.status;
 }
@@ -449,8 +461,11 @@ void testCapture(Fixture& f)
 void testRunBoundaries()
 {
     ThumbSurfaceTrace trace{};
+    trace.version = 3;
+    check(run(&trace) == ERROR_INVALID_PARAMETER && !attempted && !deadline.load(), "legacy v3 ABI does not consume one-shot");
     trace.version = 2;
-    check(run(&trace) == ERROR_INVALID_PARAMETER && !attempted && !deadline.load(), "bad ABI does not consume one-shot");
+    trace.size = 18640;
+    check(run(&trace) == ERROR_INVALID_PARAMETER && !attempted && !deadline.load(), "legacy v2 ABI does not consume one-shot");
     trace = {};
     trace.size = 18640;
     check(run(&trace) == ERROR_INVALID_PARAMETER && !attempted, "legacy v2 buffer size rejected");

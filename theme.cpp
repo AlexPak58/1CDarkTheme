@@ -712,12 +712,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
 }
 
 #ifdef THEME_THUMB_SURFACE_PROBE
-extern "C" __declspec(dllexport) DWORD WINAPI ThumbSurfaceProbeAbiV3(LPVOID)
+extern "C" __declspec(dllexport) DWORD WINAPI ThumbSurfaceProbeAbiV4(LPVOID)
 {
     return thumbSurfaceProbeVersion;
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI RunThumbSurfaceProbeV3(LPVOID output)
+extern "C" __declspec(dllexport) DWORD WINAPI RunThumbSurfaceProbeV4(LPVOID output)
 {
     if (!inDesigner()) return ERROR_NOT_SUPPORTED;
     return thumb_surface_capture::run(output);

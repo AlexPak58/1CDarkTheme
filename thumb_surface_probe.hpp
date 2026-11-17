@@ -3,15 +3,15 @@
 #include "platform.hpp"
 #include <type_traits>
 
-inline constexpr DWORD thumbSurfaceProbeVersion = 3;
+inline constexpr DWORD thumbSurfaceProbeVersion = 4;
 inline constexpr DWORD thumbSurfaceCaptureMs = 60000;
 inline constexpr size_t thumbSurfaceCapacity = 128;
 inline constexpr auto thumbSurfaceImageUiHash =
     L"C807765D1C990287EDDF752A53F7E0335269AF2B8ADD4FCE20920ED99E387846";
 inline constexpr auto thumbSurfaceImageHash =
     L"5F7F474CA58EDAEC4BC12478432D7D56C7EC092A92CED94FA0C0873B5D38B288";
-inline constexpr char thumbSurfaceRunExport[] = "RunThumbSurfaceProbeV3";
-inline constexpr char thumbSurfaceAbiExport[] = "ThumbSurfaceProbeAbiV3";
+inline constexpr char thumbSurfaceRunExport[] = "RunThumbSurfaceProbeV4";
+inline constexpr char thumbSurfaceAbiExport[] = "ThumbSurfaceProbeAbiV4";
 
 enum class ThumbSurfaceStage : DWORD {
     OtherCall, GraphicsChain, DrawReturn, DelegatedDraw, DelegatedFrames, PaintReturn, OwnerReturn,

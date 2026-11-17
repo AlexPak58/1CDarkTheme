@@ -651,9 +651,13 @@ DWORD applyProfile(const ThemeProfile& profile, ULONG_PTR zones)
     if (zones && (installationResult == ERROR_NOT_READY || installationResult == ERROR_MOD_NOT_FOUND))
         installationResult = installSites();
     if (zones && installationResult != ERROR_SUCCESS) return installationResult;
-    if (zones & enableScrollerPng) {
+    if (zones & (enableScrollerPng | enableScrollerThumb)) {
         const auto pngResult = scroller_png_hook::ensure(frameBase, graphicsBase, wbaseBase, activeProfile);
         if (pngResult) return pngResult;
+    }
+    if (zones & enableScrollerThumb) {
+        const auto thumbResult = scroller_png_hook::ensureThumb();
+        if (thumbResult) return thumbResult;
     }
 
     if (zones && designerMainWindow(mainWindow.window, pid) != mainWindow) return ERROR_NOT_READY;
@@ -725,7 +729,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI RunThumbSurfaceProbeV5(LPVOID outp
 #endif
 
 #ifndef THEME_BACKGROUND_ONLY
-extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV10(LPVOID)
+extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV11(LPVOID)
 {
     return themeProfileVersion;
 }

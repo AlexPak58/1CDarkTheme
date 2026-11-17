@@ -1,6 +1,8 @@
 #pragma once
 
 #include "scroller_png.hpp"
+#include "thumb_png.hpp"
+#include "thumb_paint.hpp"
 #include "attach_process.hpp"
 #include <atomic>
 #include <intrin.h>
@@ -28,6 +30,16 @@ inline Binding binding;
 inline std::atomic<const Binding*> published{};
 inline DWORD installation = ERROR_NOT_READY;
 
+struct ThumbBinding {
+    thumb_paint::Images images;
+    thumb_png::CairoApi api;
+};
+// Prepared only when the separately controlled thumb zone is requested.
+// Publishing it never changes the immutable static-PNG binding.
+inline ThumbBinding thumbBinding;
+inline std::atomic<const ThumbBinding*> publishedThumb{};
+inline DWORD thumbPreparation = ERROR_NOT_READY;
+
 inline void* patternForSurface(void* surface, const Binding& state,
                                const ThemeProfile* profile, const scroller_png::Identity* identity)
 {
@@ -51,24 +63,59 @@ inline void* patternForSurface(void* surface, const Binding& state,
     return result;
 }
 
+inline void* patternForThumb(void* surface, const Binding& state, const ThumbBinding& thumb,
+                            const ThemeProfile* profile, const ThumbSurfaceIdentity& id)
+{
+    const auto incomingError = GetLastError();
+    void* copy{};
+    if (profile && (profile->zones & enableScrollerThumb) && surface &&
+        !state.api.status(surface) && !state.api.type(surface) &&
+        thumb_paint::knownSurface(id, state.api.format(surface), state.api.width(surface), state.api.height(surface))) {
+        const auto background = id.cacheState == 3 ? scrollerThumbPressed :
+                                id.cacheState == 2 ? scrollerThumbHover : scrollerThumbBackground;
+        copy = thumb_png::clone(thumb.api, surface,
+            {profile->colors[background], profile->colors[scrollerThumbDetail]});
+    }
+    SetLastError(incomingError);
+    void* result = state.original(copy ? copy : surface);
+    const auto outgoingError = GetLastError();
+    if (copy) state.api.destroy(copy);
+    SetLastError(outgoingError);
+    return result;
+}
+
 inline void* createPattern(void* surface)
 {
+    const auto caller = reinterpret_cast<ULONG_PTR>(_AddressOfReturnAddress());
     const auto state = published.load(std::memory_order_acquire);
 #ifdef THEME_THUMB_SURFACE_PROBE
     // Pass the original caller's stack address before the observer adds frames.
     // This code is absent from the normal production build.
     const auto observerError = GetLastError();
-    thumb_surface_capture::observe(reinterpret_cast<ULONG_PTR>(_AddressOfReturnAddress()), surface, *state);
+    thumb_surface_capture::observe(caller, surface, *state);
     SetLastError(observerError);
 #endif
     const auto profile = state->profile->load(std::memory_order_acquire);
-    if (!(profile->zones & enableScrollerPng)) return state->original(surface);
+    if (!(profile->zones & (enableScrollerPng | enableScrollerThumb))) return state->original(surface);
     const auto incomingError = GetLastError();
     scroller_png::Identity identity{};
-    const bool matched = scroller_png::identify(reinterpret_cast<ULONG_PTR>(_AddressOfReturnAddress()),
+    const bool matched = (profile->zones & enableScrollerPng) && scroller_png::identify(caller,
                                                 state->frame, state->graphics, state->wbase, identity);
+    if (matched) {
+        SetLastError(incomingError);
+        return patternForSurface(surface, *state, profile, &identity);
+    }
+    if (profile->zones & enableScrollerThumb) {
+        const auto thumb = publishedThumb.load(std::memory_order_acquire);
+        ThumbSurfaceIdentity id{};
+        thumb_paint::CacheObservation cache;
+        if (thumb && thumb_paint::locatePaint(caller, thumb->images, id, cache) == ThumbSurfaceStage::Accepted) {
+            SetLastError(incomingError);
+            return patternForThumb(surface, *state, *thumb, profile, id);
+        }
+    }
     SetLastError(incomingError);
-    return matched ? patternForSurface(surface, *state, profile, &identity) : state->original(surface);
+    return state->original(surface);
 }
 
 inline bool imageRegion(ULONG_PTR address, ULONG_PTR image, SIZE_T length, DWORD protection)
@@ -197,5 +244,44 @@ inline DWORD ensure(ULONG_PTR frame, ULONG_PTR graphics, ULONG_PTR wbase,
     binding = candidate;
     published.store(&binding, std::memory_order_release);
     return installation = installSlot(binding);
+}
+
+inline DWORD prepareThumb(const Binding& state, ThumbBinding& prepared)
+{
+    struct ModuleRef {
+        HMODULE value{};
+        ~ModuleRef() { if (value) FreeLibrary(value); }
+        bool open(LPCWSTR name) { return GetModuleHandleExW(0, name, &value) != FALSE; }
+    } imageUi, image;
+    if (!imageUi.open(L"imageui.dll") || !image.open(L"image.dll")) return ERROR_MOD_NOT_FOUND;
+    if (!matchesSha256(modulePath(imageUi.value), thumbSurfaceImageUiHash) ||
+        !matchesSha256(modulePath(image.value), thumbSurfaceImageHash)) return ERROR_REVISION_MISMATCH;
+    prepared.images = {state.frame, state.graphics, state.wbase, reinterpret_cast<ULONG_PTR>(imageUi.value)};
+    prepared.api.surface = state.api;
+    const auto cairo = reinterpret_cast<HMODULE>(state.cairo);
+    if (!resolve(cairo, "cairo_surface_set_device_scale", prepared.api.setScale) ||
+        !resolve(cairo, "cairo_surface_set_device_offset", prepared.api.setOffset)) return ERROR_PROC_NOT_FOUND;
+    constexpr DWORD pin = GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
+    for (const auto module : {imageUi.value, image.value}) {
+        HMODULE pinned{};
+        if (!GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(module), &pinned)) return errorOr(ERROR_DLL_INIT_FAILED);
+    }
+    return ERROR_SUCCESS;
+}
+
+// Serialized by the same installationLock as ensure(). A failed optional
+// preparation leaves the existing static-PNG hook usable and the old profile active.
+inline DWORD ensureThumb()
+{
+    if (thumbPreparation == ERROR_SUCCESS) return ERROR_SUCCESS;
+    if (thumbPreparation != ERROR_NOT_READY && thumbPreparation != ERROR_MOD_NOT_FOUND) return thumbPreparation;
+    if (installation != ERROR_SUCCESS || published.load(std::memory_order_acquire) != &binding)
+        return ERROR_NOT_READY;
+    ThumbBinding candidate;
+    const auto error = prepareThumb(binding, candidate);
+    if (error) return thumbPreparation = error;
+    thumbBinding = candidate;
+    publishedThumb.store(&thumbBinding, std::memory_order_release);
+    return thumbPreparation = ERROR_SUCCESS;
 }
 } // namespace scroller_png_hook

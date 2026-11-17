@@ -172,6 +172,39 @@ struct Fixture {
     }
 };
 
+void testKnownThumbSurfaces()
+{
+    ThumbSurfaceIdentity id{};
+    id.windowTableRva = 0xABEDB0; id.scrollerTableRva = 0x3CA78;
+    id.enabled = id.interactive = 1;
+    const DWORD vertical[]{0x19AF5, 0x19B78, 0x19BFD, 0x19ED0};
+    const DWORD horizontal[]{0x19FAD, 0x1A030, 0x1A0B5, 0x19ED0};
+    const int vRgb[]{5, 1, 5, 6}, hRgb[]{5, 1, 5, 5}, vArgb[]{6, 1, 6, 7};
+    for (size_t i = 0; i < 4; ++i) {
+        id.drawReturnRva = vertical[i];
+        check(thumb_paint::knownSurface(id, 1, 16, vRgb[i]) &&
+              !thumb_paint::knownSurface(id, 0, 20, vArgb[i]), "editor RGB24 observed; editor ARGB32 pending");
+        id.windowTableRva = 0xA885D0; id.scrollerTableRva = 0x3CD00;
+        check(thumb_paint::knownSurface(id, 0, 20, vArgb[i]) &&
+              thumb_paint::knownSurface(id, 1, 16, vRgb[i]) &&
+              !thumb_paint::knownSurface(id, 0, 21, vArgb[i]) &&
+              !thumb_paint::knownSurface(id, 1, 16, vRgb[i] + 1), "both tree formats require exact part dimensions");
+        id.windowTableRva = 0xABEDB0; id.scrollerTableRva = 0x3CA78;
+        id.orientation = 1; id.drawReturnRva = horizontal[i];
+        check(thumb_paint::knownSurface(id, 1, hRgb[i], 16) &&
+              !thumb_paint::knownSurface(id, 1, 16, hRgb[i]), "horizontal editor RGB24 part geometry");
+        id.orientation = 0;
+    }
+    id.drawReturnRva = vertical[0];
+    id.enabled = 0;
+    check(!thumb_paint::knownSurface(id, 1, 16, 5), "disabled thumb awaits live coverage");
+    id.enabled = 1; id.interactive = 0;
+    check(!thumb_paint::knownSurface(id, 1, 16, 5), "noninteractive thumb awaits live coverage");
+    id.interactive = 1;
+    check(!thumb_paint::knownSurface(id, 2, 16, 5), "unconfirmed image format rejected");
+    id.drawReturnRva = 0x19410;
+    check(!thumb_paint::knownSurface(id, 1, 16, 5), "track return not a thumb part");
+}
 void testRoutes(Fixture& f)
 {
     for (const auto draw : resizedReturns) {
@@ -651,6 +684,7 @@ int main()
 {
     Fixture f;
     testRunBoundaries();
+    testKnownThumbSurfaces();
     testRoutes(f);
     testMetadata(f);
     testCacheDiagnostics(f);

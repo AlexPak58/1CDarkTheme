@@ -5,7 +5,7 @@ if /i not "%VSCMD_ARG_TGT_ARCH%"=="x64" (
     exit /b 2
 )
 if "%~1"=="" (
-    echo Usage: run.cmd ^<new external artifact directory^> 1>&2
+    echo Usage: run.cmd ^<new external artifact directory^> [absolute pinned cairo.dll path] 1>&2
     exit /b 2
 )
 set "OUT=%~f1"
@@ -45,7 +45,7 @@ call "%CD%\build.cmd" "%OUT%\property-paint" property-paint-probe
 if errorlevel 1 goto failed
 call "%CD%\build.cmd" "%OUT%\property-text" property-text-probe
 if errorlevel 1 goto failed
-for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test devtool-binding-test global-search-test frame-probe-test frame-launcher-test panel-headers-test scroller-probe-test scroller-launcher-test scroller-corner-test scroller-png-test scroller-png-hook-test png-surface-probe-test png-surface-launcher-test thumb-surface-probe-test thumb-surface-launcher-test dock-probe-test dock-launcher-test dock-splitters-test property-probe-test property-launcher-test property-paint-probe-test property-paint-launcher-test property-text-probe-test property-text-launcher-test) do (
+for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test devtool-binding-test global-search-test frame-probe-test frame-launcher-test panel-headers-test scroller-probe-test scroller-launcher-test scroller-corner-test scroller-png-test scroller-png-hook-test thumb-png-test png-surface-probe-test png-surface-launcher-test thumb-surface-probe-test thumb-surface-launcher-test dock-probe-test dock-launcher-test dock-splitters-test property-probe-test property-launcher-test property-paint-probe-test property-paint-launcher-test property-text-probe-test property-text-launcher-test) do (
     cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /I. "%~dp0%%T.cpp" /Fo"%OUT%\%%T.obj" /Fe"%OUT%\%%T.exe" /link bcrypt.lib dwmapi.lib user32.lib
     if errorlevel 1 goto failed
 )
@@ -89,6 +89,12 @@ if errorlevel 1 goto failed
 if errorlevel 1 goto failed
 "%OUT%\scroller-png-hook-test.exe"
 if errorlevel 1 goto failed
+if not "%~2"=="" (
+    "%OUT%\thumb-png-test.exe" "%~f2"
+    if errorlevel 1 goto failed
+) else (
+    echo SKIP: real Cairo thumb fixture needs an explicit pinned cairo.dll path.
+)
 "%OUT%\scroller-launcher-test.exe" "%OUT%\scroller\scroller-identity-probe.dll" "%OUT%\frame\local-frame-probe.dll" "%OUT%\normal\tree-theme.dll"
 if errorlevel 1 goto failed
 "%OUT%\png-surface-probe-test.exe"

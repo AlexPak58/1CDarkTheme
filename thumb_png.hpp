@@ -56,10 +56,10 @@ inline bool paint(const BYTE* source, BYTE* destination, const Image& src, const
                 if (src.format == argb32 && channel > alpha) return false;
                 straight |= (alpha ? (channel * 255 + alpha / 2) / alpha : 0) << shift;
             }
-            const auto mapped = scroller_png::detail::blendArrow(straight, palette.background, palette.detail);
+            const auto mappedRgb = scroller_png::detail::blendArrow(straight, palette.background, palette.detail);
             DWORD result = src.format == argb32 ? alpha << 24 : 0;
             for (unsigned shift = 0; shift <= 16; shift += 8)
-                result |= ((((mapped >> shift) & 255) * alpha + 127) / 255) << shift;
+                result |= ((((mappedRgb >> shift) & 255) * alpha + 127) / 255) << shift;
             std::memcpy(destination + static_cast<size_t>(y) * dst.stride + static_cast<size_t>(x) * 4, &result, 4);
         }
     }

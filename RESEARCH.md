@@ -11238,3 +11238,71 @@ DLL построена на51e86b9, helper на2225920; точные байты 
 учётом EOL), AMD64/V2; ABI-функция возвращает2. Исходный receipt сохранён
 как снимок этапа сборки со старым `Independent review pending`; итог
 последующего ревью находится в review.json. Это не live-подтверждение.
+
+## 2026-11-17: подготовка ARGB32-бегунков без управления экраном
+
+Контрольная точка: main799ca40; новая работа только в исходниках и отдельных
+процессах тестов. UI-приоритет остаётся неразрешённым, ввод/перезапуск BPDemo
+не выполнялись. Установленная диагностическая B3 не заменялась. C2 live и
+возврат общего v10 tray остаются обязательными следующими runtime-шагами.
+
+Проверяемая гипотеза: resized-thumb route уже выделен B2/B3, а отдельная
+копия Cairo IMAGE может менять RGB, сохраняя alpha, premultiplication,
+геометрию, padding исходника и device transforms. Рабочие ветки
+codex/thumb-argb-20261117 и codex/thumb-palette-20261117; parent владеет
+общим matcher/hook и документацией. Исходный locatePaint извлекается без
+смены проверок, диагностика остаётся условной. Цвета бегунка — отдельная
+opt-in зона будущего профиля11; старые файлы/маски не включают её сами.
+
+Ограничение кандидатного production-gate: только наблюдавшиеся RGB24
+16px для дерева/editorV/H и ARGB32 20px treeV; точные размеры частей.
+Disabled/noninteractive и ARGB32 editor остаются pass-through до живой
+проверки. Поддержка форматов/трансформаций самой функции копирования не
+означает расширения списка подтверждённых окон. Цвет пояснения ID11 здесь
+не меняется. Это подготовка, не заявление об исправлении белых пятен.
+
+Попытки live не расходованы: ID11/C failures1/remaining2;
+thumb/B failures2/remaining1. Следующий переход — адресные native/Cairo
+и managed проверки, независимое ревью, пакет с runtime=not-run.
+
+Контрольная запись интеграции v11: tacticId=thumb-v11-offline-A,
+component=theme/Cairo-profile11; runtime-authority unchanged, UI not used.
+Два сбоя C4459-header-shadow при /W4 /WX: enabled в общем matcher
+скрыл global enabled profile fixture; mapped в clone скрыл global mapped
+fixture глобального поиска. Исправлены только локальные имена
+(configEnabled/mappedRgb), без ослабления предупреждений. Actors=root
+(integrated compile), clone source=thumb_argb_clone. Для этой сигнатуры
+A failures2/remaining1; следующий сбой потребует независимого разбора.
+Отдельный сбой profile-fixture-expected-success: новый optional hook
+правильно отказал standalone-процессу без Cairo; independent reviewer
+подтвердил неверное ожидание теста. Проверка теперь требует отказ и
+неизменные activeProfile/history. Повторный адресный запуск — PASS.
+Всего offline failures3, обе причины исправлены. Live counters неизменны.
+Полная native-проверка выбрана из-за общего ABI/header, чтобы охватить
+другие helper/fixture потребители. Следующий переход — один повтор после
+локального переименования; ранее пройденные managed151/45 не повторяются.
+
+Результат offline-проверки v11: повтор полного tests/NativeTests/run.cmd
+с явным путём закреплённого cairo.dll завершился exit0. Собраны все
+предусмотренные runner варианты DLL/helper; пройдены все native fixtures,
+включая72 настоящих Cairo-сценария и отрицательные проверки памяти,
+альфы, API, размеров и владения. Native ABI/attach проверен с реальным
+ThemeProfileAttachV11 без compile-time alias. Нормальная DLL экспортирует
+только SetThemeProfile, SetTreeTheme, ThemeProfileAttachV11; захватов и
+probe worker в ней нет. Managed Configuration151/Monitor45 — PASS;
+WPF Release —0 предупреждений/ошибок, restore из локального пустого
+источника пакетов. Строгие /W4 /WX сохранены.
+
+Независимое source review — PASS после исправления неверного ожидания
+profile fixture. Проверка извлечённых drawReturnRva/checkCache/locatePaint
+против799ca40 также точная: различаются EOL и локальное имя enabled.
+Позднейшее mapped→mappedRgb устраняет shadow-warning и не меняет mapping.
+Оба compile-конфликта закрыты; третьей C4459 не было, подход B не запускался.
+
+Итог блока — source/build/offline-test, не live. Профиль11 содержит48цветов,
+новая зона131072 выключена в поставляемых пресетах; прежние44цвета и mask
+сохранены. Нет доказательства внешнего вида/нагрузки новой перекраски в1С.
+Не менялись рабочий пресет, редакторская палитра, установленные DLL,
+процессы BPDemo/трея. Следующий live-переход по-прежнему требует стабильного
+экрана: общий v10tray, ID11/C2; затем запланированная полная проба бегунков.
+Для v11 понадобится штатный перезапуск только разрешённой BPDemo.

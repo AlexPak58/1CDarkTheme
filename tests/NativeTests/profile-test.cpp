@@ -152,10 +152,12 @@ int main(int argc, char** argv)
           activeProfile.load()->colors[panelBorder] == 0x246810, "accept panel header and border palette in isolation");
     profile.zones = enableScrollerThumb;
     profile.colors[scrollerThumbBackground] = 0xABCDEF;
-    check(SetThemeProfile(&profile) == ERROR_SUCCESS &&
-          activeProfile.load()->zones == enableScrollerThumb &&
-          activeProfile.load()->colors[scrollerThumbBackground] == 0xABCDEF,
-          "accept thumb palette only when explicitly enabled");
+    const auto beforeThumb = activeProfile.load();
+    const auto historyBeforeThumb = profileCount;
+    check(!GetModuleHandleW(L"cairo.dll"), "standalone fixture has no platform Cairo module");
+    check(SetThemeProfile(&profile) == ERROR_MOD_NOT_FOUND && activeProfile.load() == beforeThumb &&
+          profileCount == historyBeforeThumb,
+          "thumb preparation failure preserves the active profile and snapshot history");
     profile.zones = enableTreeOnly;
     profile.colors[treeBackground] = 0x345678;
     check(SetThemeProfile(&profile) == ERROR_SUCCESS, "second profile");

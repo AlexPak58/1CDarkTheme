@@ -52,6 +52,7 @@ DWORD patternToken{};
 template<int Surface::*Field> int integer(const void* p) { return static_cast<const Surface*>(p)->*Field; }
 void scale(const void*, double* x, double* y) { *x = *y = 1; }
 void offset(const void*, double* x, double* y) { *x = *y = 0; }
+void setPair(void*, double, double) { SetLastError(891); }
 void flush(void*) { SetLastError(888); }
 void dirty(void*) { SetLastError(889); }
 void destroy(void* p) { ++destroys; --static_cast<Surface*>(p)->references; SetLastError(890); }
@@ -122,6 +123,65 @@ void testPattern()
     destroy(&source);
     scroller_png_hook::published.store(nullptr);
 }
+void testThumbPattern()
+{
+    source = {}; copy = {};
+    source.format = 0; source.width = 20; source.height = 6; source.stride = 80;
+    source.pixels.fill(0xFFFAFAFA);
+    const auto before = source.pixels;
+    auto state = fixtureBinding();
+    scroller_png_hook::ThumbBinding thumb{{}, {state.api, setPair, setPair}};
+    ThemeProfile profile;
+    profile.zones = enableScrollerThumb;
+    ThumbSurfaceIdentity id{};
+    id.windowTableRva = 0xA885D0; id.scrollerTableRva = 0x3CD00;
+    id.drawReturnRva = 0x19AF5; id.enabled = id.interactive = 1;
+    originalCalls = clones = destroys = 0;
+    for (DWORD cacheState : {0UL, 2UL, 3UL}) {
+        id.cacheState = cacheState;
+        id.hotId = cacheState == 2 ? 5 : 0;
+        id.pressedId = cacheState == 3 ? 5 : 0;
+        const auto callsBefore = originalCalls;
+        SetLastError(1234);
+        check(scroller_png_hook::patternForThumb(&source, state, thumb, &profile, id) == &patternToken,
+              "thumb wrapper returns original result");
+        const auto color = cacheState == 3 ? scrollerThumbPressed :
+                           cacheState == 2 ? scrollerThumbHover : scrollerThumbBackground;
+        check(originalCalls == callsBefore + 1 && chosen == &copy && copy.references == 1 && source.references == 1 &&
+              incomingOriginalError == 1234 && GetLastError() == 0xBABE &&
+              copy.pixels[0] == (0xFF000000 | profile.colors[color]) && source.pixels == before,
+              "thumb states use separate colors, preserve source and LastError, retain clone in pattern");
+        destroy(&copy);
+    }
+    const auto copies = clones;
+    const auto fallback = [&] {
+        const auto callsBefore = originalCalls;
+        SetLastError(7654);
+        scroller_png_hook::patternForThumb(&source, state, thumb, &profile, id);
+        check(originalCalls == callsBefore + 1 && chosen == &source && incomingOriginalError == 7654 &&
+              GetLastError() == 0xBABE && source.pixels == before, "thumb rejection passes original exactly once");
+        destroy(&source);
+    };
+    profile.zones = enableScrollerPng; fallback();
+    profile.zones = enableScrollerThumb; id.enabled = 0; fallback();
+    id.enabled = 1; id.interactive = 0; fallback();
+    id.interactive = 1; source.width = 21; fallback(); source.width = 20;
+    id.windowTableRva = 0xABEDB0; id.scrollerTableRva = 0x3CA78; fallback();
+    check(clones == copies, "disabled/uncovered thumb layouts do not allocate");
+    id.windowTableRva = 0xA885D0; id.scrollerTableRva = 0x3CD00;
+    denyCreate = true; fallback(); denyCreate = false;
+    check(clones == copies + 1, "failed thumb allocation falls back safely");
+    std::atomic<const ThemeProfile*> active{&profile}; state.profile = &active;
+    scroller_png_hook::published.store(&state);
+    scroller_png_hook::publishedThumb.store(&thumb);
+    SetLastError(4422);
+    scroller_png_hook::createPattern(&source);
+    check(chosen == &source && clones == copies + 1 && incomingOriginalError == 4422 && GetLastError() == 0xBABE,
+          "unrelated call remains unchanged with only thumb zone enabled");
+    destroy(&source);
+    scroller_png_hook::publishedThumb.store(nullptr);
+    scroller_png_hook::published.store(nullptr);
+}
 void testIat()
 {
     iatPage = VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -160,6 +220,6 @@ void testIat()
 }
 int main()
 {
-    testPattern(); testIat();
-    std::puts("PASS: scoped PNG wrapper, Cairo reference lifetime, fallback, LastError and IAT CAS rollback");
+    testPattern(); testThumbPattern(); testIat();
+    std::puts("PASS: scoped static/thumb PNG wrappers, Cairo reference lifetime, fallback, LastError and IAT CAS rollback");
 }

@@ -18,9 +18,9 @@ inline constexpr DWORD ownerNativeTypeRva = 0xB1FD88;
 // Mirror the form's unsigned lower_bound without invoking platform code.
 // Attached controls are not necessarily registered yet. Require this exact W.
 template <typename Reader>
-Outcome registeredControl(const Reader& read, ULONG_PTR form, ULONG_PTR site, DWORD id)
+Outcome registeredControl(const Reader& read, ULONG_PTR form, ULONG_PTR site, DWORD id, bool allowText11 = false)
 {
-    if (site < 8 || (id != 8 && id != 10)) return Outcome::Mismatch;
+    if (site < 8 || (id != 8 && id != 10 && !(allowText11 && id == 11))) return Outcome::Mismatch;
     ULONG_PTR head{}, node{}, candidate{};
     BYTE sentinel{};
     if (!read.read(form, 8, head) || !head || !read.read(head, 0x19, sentinel) ||

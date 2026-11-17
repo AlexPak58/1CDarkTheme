@@ -43,7 +43,9 @@ call "%CD%\build.cmd" "%OUT%\property" property-probe
 if errorlevel 1 goto failed
 call "%CD%\build.cmd" "%OUT%\property-paint" property-paint-probe
 if errorlevel 1 goto failed
-for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test devtool-binding-test global-search-test frame-probe-test frame-launcher-test panel-headers-test scroller-probe-test scroller-launcher-test scroller-corner-test scroller-png-test scroller-png-hook-test png-surface-probe-test png-surface-launcher-test thumb-surface-probe-test thumb-surface-launcher-test dock-probe-test dock-launcher-test dock-splitters-test property-probe-test property-launcher-test property-paint-probe-test property-paint-launcher-test) do (
+call "%CD%\build.cmd" "%OUT%\property-text" property-text-probe
+if errorlevel 1 goto failed
+for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test devtool-binding-test global-search-test frame-probe-test frame-launcher-test panel-headers-test scroller-probe-test scroller-launcher-test scroller-corner-test scroller-png-test scroller-png-hook-test png-surface-probe-test png-surface-launcher-test thumb-surface-probe-test thumb-surface-launcher-test dock-probe-test dock-launcher-test dock-splitters-test property-probe-test property-launcher-test property-paint-probe-test property-paint-launcher-test property-text-probe-test property-text-launcher-test) do (
     cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /I. "%~dp0%%T.cpp" /Fo"%OUT%\%%T.obj" /Fe"%OUT%\%%T.exe" /link bcrypt.lib dwmapi.lib user32.lib
     if errorlevel 1 goto failed
 )
@@ -109,6 +111,12 @@ if errorlevel 1 goto failed
 if errorlevel 1 goto failed
 "%OUT%\property-paint-launcher-test.exe" "%OUT%\property-paint\property-paint-probe.dll" "%OUT%\property\property-description-probe.dll" "%OUT%\normal\tree-theme.dll"
 if errorlevel 1 goto failed
+"%OUT%\property-text-probe-test.exe"
+if errorlevel 1 goto failed
+"%OUT%\property-text-launcher-test.exe" "%OUT%\property-text\property-text-probe.dll" "%OUT%\property-paint\property-paint-probe.dll" "%OUT%\normal\tree-theme.dll"
+if errorlevel 1 goto failed
+"%OUT%\property-text\property-text-probe-run.exe" --attach bogus 1 --palette impossible
+if not "%errorlevel%"=="2" goto failed
 "%OUT%\property-paint\property-paint-probe-run.exe" --attach bogus 1 --palette impossible
 if not "%errorlevel%"=="2" goto failed
 "%OUT%\png-surface\png-surface-probe-run.exe" --attach bogus 1 --palette impossible

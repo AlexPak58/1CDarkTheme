@@ -114,7 +114,8 @@ inline bool matchesOffset(ULONG_PTR base, ULONG_PTR offset, ULONG_PTR value)
 // A table from this exact image is evidence of an explicit mismatch.
 // Missing/unreadable links and inconsistent backlinks are kept separate.
 template <typename Reader>
-Outcome inspectFamily(const Reader& read, ULONG_PTR frame, ULONG_PTR form, Identity& id, Stage* stage = nullptr)
+Outcome inspectFamily(const Reader& read, ULONG_PTR frame, ULONG_PTR form, Identity& id, Stage* stage = nullptr,
+                      bool allowText11 = false)
 {
     setStage(stage, Stage::FormTables);
     if (!form) return Outcome::ReadFailure;
@@ -172,7 +173,8 @@ Outcome inspectFamily(const Reader& read, ULONG_PTR frame, ULONG_PTR form, Ident
     if (!matchesOffset(managerHost, 0x18, shell) || managerShell != shell || managerFormView != shellFormView)
         return Outcome::Mismatch;
     setStage(stage, Stage::FamilyId);
-    if (id.controlId != 8 && id.controlId != 10) return Outcome::Mismatch;
+    if (id.controlId != 8 && id.controlId != 10 && !(allowText11 && id.controlId == 11))
+        return Outcome::Mismatch;
     id.kind = id.controlId == 10 ? Kind::Description : Kind::List;
     id.managerRva = static_cast<DWORD>(managerTable - frame);
     id.managerViewRva = static_cast<DWORD>(managerViewTable - frame);

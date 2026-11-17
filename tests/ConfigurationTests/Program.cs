@@ -33,17 +33,26 @@ Check(configPath == Path.Combine(run, "config.json"), "environment data root");
 var shippedNames = new[] { "dark", "graphite", "pink", "native" };
 for (var i = 0; i < shippedNames.Length; i++)
 {
-    var file = PresetFile.Load(Path.Combine(AppContext.BaseDirectory, "presets", shippedNames[i] + ".json"));
+    var packagePath = Path.Combine(AppContext.BaseDirectory, "presets", shippedNames[i] + ".json");
+    var file = PresetFile.Load(packagePath);
     var builtin = Palette.BuiltIns[i];
     Check(file.Hash.Length == 64 && file.Preset.Name == builtin.Name && file.Preset.Mask == builtin.Mask
           && file.Preset.Colors.SequenceEqual(builtin.Colors), "packaged preset");
+    Check(file.Preset.Mask == (i == 3 ? 0 : 32511), "packaged splitter zone default");
+    using var packaged = JsonDocument.Parse(File.ReadAllText(packagePath));
+    Check(packaged.RootElement.GetProperty("schemaVersion").GetInt32() == 1 &&
+          packaged.RootElement.GetProperty("paletteVersion").GetInt32() == 8, "packaged v8 profile");
 }
 
 var dark = Palette.BuiltIns[0];
+Check(dark.Colors[36] == "#3B4758", "dark splitter color");
 var headerZone = Palette.Zones.Single(zone => zone.Bit == 8192);
 Check(headerZone.Label == "Рамки и заголовки панелей" && headerZone.Offset == 33 &&
       headerZone.Fields.SequenceEqual(["Фон рамки и заголовка", "Текст заголовка", "Наружная рамка панелей"]),
       "panel header and border editor fields");
+var splitterZone = Palette.Zones.Single(zone => zone.Bit == 16384);
+Check(splitterZone.Label == "Разделители панелей" && splitterZone.Offset == 36 &&
+      splitterZone.Fields.SequenceEqual(["Фон разделителей панелей"]), "splitter editor field");
 var firstPath = Path.Combine(run, "presets", "first.json");
 var secondPath = Path.Combine(run, "presets", "second.json");
 var firstHash = PresetFile.Save(firstPath, dark, "");
@@ -51,16 +60,27 @@ var edited = dark with { Colors = [..dark.Colors] };
 edited.Colors[33] = " 1122cc ";
 edited.Colors[34] = "#99ff00";
 edited.Colors[35] = " 3a4b5c ";
+edited.Colors[36] = " 558ac3 ";
 var secondHash = PresetFile.Save(secondPath, edited, "");
 var first = PresetFile.Load(firstPath);
 var second = PresetFile.Load(secondPath);
 Check(first.Hash == firstHash && second.Hash == secondHash && first.Hash != second.Hash, "round-trip hashes");
 Check(first.Preset.Name == second.Preset.Name && first.Preset.Colors[33] != second.Preset.Colors[33], "same display name");
 var cli = Palette.Encode(second.Preset.Mask, second.Preset.Colors);
-Check(cli.StartsWith("16127:") && cli.Split(',').Length == 36 && cli.EndsWith(",1122CC,99FF00,3A4B5C"),
-      "normalized panel header and border colors and default mask are sent to CLI");
+Check(cli.StartsWith("32511:") && cli.Split(',').Length == 37 && cli.EndsWith(",1122CC,99FF00,3A4B5C,558AC3"),
+      "normalized panel and splitter colors and default mask are sent to CLI");
 using (var saved = JsonDocument.Parse(File.ReadAllText(secondPath)))
-    Check(saved.RootElement.GetProperty("paletteVersion").GetInt32() == 7, "saved v7");
+    Check(saved.RootElement.GetProperty("schemaVersion").GetInt32() == 1 &&
+          saved.RootElement.GetProperty("paletteVersion").GetInt32() == 8, "saved v8 profile");
+foreach (var mask in new[] { 0, 16384, 32767 })
+{
+    var splitterPath = Path.Combine(run, $"splitter-{mask}.json");
+    PresetFile.Save(splitterPath, edited with { Mask = mask });
+    var splitter = PresetFile.Load(splitterPath).Preset;
+    Check(splitter.Mask == mask && splitter.Colors[36] == "#558AC3" &&
+          splitter.Colors.Take(36).SequenceEqual(second.Preset.Colors.Take(36)),
+          $"splitter color persists with mask {mask}");
+}
 Reject<IOException>(() => PresetFile.Save(firstPath, edited, secondHash));
 Reject<IOException>(() => PresetFile.Save(firstPath, edited, ""));
 Check(PresetFile.Load(firstPath).Hash == firstHash, "stale writes retained file");
@@ -87,30 +107,35 @@ Check(PresetFile.Load(firstPath).Hash == replaced, "oversized output retained fi
 Reject<JsonException>(() => PresetFile.Parse("{invalid"));
 Reject<JsonException>(() => PresetFile.Parse("""{"schemaVersion":1,"schemaVersion":1}"""));
 Reject<JsonException>(() => PresetFile.Parse("""{"schemaVersion":1,"name":"X","paletteVersion":7,"colors":[]}"""));
-Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Mask = 16384 }));
+Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Mask = 32768 }));
 Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Colors = dark.Colors[..^1] }));
+Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Colors = [..dark.Colors, "#AABBCC"] }));
 Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Colors = [..dark.Colors[..^1], "zzzzzz"] }));
 
+string[] LegacyColors(int count) => Enumerable.Range(0, count).Select(i => $"#{0xA10000 + i:X6}").ToArray();
 foreach (var (version, count, mask) in new[]
-    { (1, 25, 511), (2, 29, 1023), (3, 30, 2047), (4, 31, 4095), (5, 33, 8191), (6, 35, 16383) })
+    { (1, 25, 511), (2, 29, 1023), (3, 30, 2047), (4, 31, 4095), (5, 33, 8191), (6, 35, 16383), (7, 36, 16383) })
 {
-    string Json(int selectedMask) => JsonSerializer.Serialize(new
+    var colors = LegacyColors(count);
+    string Json(int selectedMask, int colorCount) => JsonSerializer.Serialize(new
     {
         schemaVersion = 1, paletteVersion = version, name = "legacy", mask = selectedMask,
-        colors = Enumerable.Repeat("abcdef", count)
+        colors = LegacyColors(colorCount).Select(c => c[1..].ToLowerInvariant())
     });
-    var migrated = PresetFile.Parse(Json(mask));
-    Check(migrated.Mask == mask && migrated.Colors.Length == 36 &&
-          migrated.Colors.Take(count).All(c => c == "#ABCDEF") &&
-          migrated.Colors.Skip(count).SequenceEqual(dark.Colors.Skip(count)), "legacy normalization");
-    Check(PresetFile.Parse(Json(0)).Mask == 0, "legacy native colors do not enable zones");
-    Reject<InvalidDataException>(() => PresetFile.Parse(Json(mask + 1)));
+    var migrated = PresetFile.Parse(Json(mask, count));
+    Check(migrated.Mask == mask && migrated.Colors.Length == 37 &&
+          migrated.Colors.Take(count).SequenceEqual(colors) && migrated.Colors[36] == "#3B4758" &&
+          migrated.Colors.Skip(count).SequenceEqual(dark.Colors.Skip(count)), $"v{version} legacy normalization");
+    Check(PresetFile.Parse(Json(0, count)).Mask == 0, "legacy native colors do not enable zones");
+    Reject<InvalidDataException>(() => PresetFile.Parse(Json(mask + 1, count)));
+    Reject<InvalidDataException>(() => PresetFile.Parse(Json(mask, count + 1)));
 }
 var legacyStore = new PresetStore();
 foreach (var (version, mask, colors, appended) in new[]
 {
-    (5, 7935, Enumerable.Repeat("#ABCDEF", 33).ToArray(), new[] { "#1F2938", "#E5EBF5", "#3B4758" }),
-    (6, 8192, Enumerable.Repeat("#ABCDEF", 35).ToArray(), new[] { "#3B4758" })
+    (5, 7935, LegacyColors(33), new[] { "#1F2938", "#E5EBF5", "#3B4758", "#3B4758" }),
+    (6, 8192, LegacyColors(35), new[] { "#3B4758", "#3B4758" }),
+    (7, 0x2241, LegacyColors(36), new[] { "#3B4758" })
 })
 {
     File.WriteAllText(legacyStore.Path, JsonSerializer.Serialize(new

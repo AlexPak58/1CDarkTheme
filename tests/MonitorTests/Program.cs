@@ -84,11 +84,14 @@ await monitor.PollOnceAsync();
 Check(requests.Count == 1 && changes == 1, "Unchanged successful profile is neither reapplied nor republished");
 
 var updatedDark = dark with { Colors = [..dark.Colors] };
-updatedDark.Colors[35] = "#124578";
+updatedDark.Colors[36] = "#124578";
 PresetFile.Save(defaultPath, updatedDark);
 await monitor.PollOnceAsync();
-Check(requests.Count == 2 && requests[^1].Item2 == Palette.Encode(updatedDark.Mask, updatedDark.Colors),
-    "Changed panel border color at the same path reapplies");
+var splitterProfile = requests[^1].Item2;
+Check(requests.Count == 2 && requests[^1].Item1 == designer.Identity &&
+    splitterProfile.StartsWith("32511:", StringComparison.Ordinal) &&
+    splitterProfile.Split(',').Length == 37 && splitterProfile.EndsWith(",124578", StringComparison.Ordinal),
+    "Changed splitter color at the same path reapplies");
 
 config = config with { Rules = [new(null, platform, "Designer", "override.json")] };
 ThemeConfiguration.Save(configPath, config);

@@ -717,6 +717,34 @@ def search_grid_paint_path(image, rva, code, ranges, imports, vtable, factory_ta
     return candidates[0] if len(candidates) == 1 else None
 
 
+def search_grid_factory_identity(image, rva, code, ranges, zero, nonzero, vtable, old):
+    zero_body = code[zero - rva:ranges[zero] - rva]
+    # Construct the standalone object, then write its primary vtable to [rbx].
+    standalone = re.search(rb"\x48\x8b\xc8\xe8.{4}\x48\x8d\x05(.{4})\x48\x89\x03",
+                           zero_body, re.S)
+    aggregate_body = code[nonzero - rva:ranges[nonzero] - rva]
+    # Save RCX in R13 and later store it in the wrapper, 0x18 bytes before the control.
+    saved_argument = re.search(rb"\x4c\x8b\xe9.+?\x4c\x89\xab(.{4})",
+                               aggregate_body, re.S)
+    if standalone is None or saved_argument is None:
+        return None
+    standalone_table = zero + standalone.end(1) + struct.unpack("<i", standalone[1])[0]
+    palette_slot, renderer_slot = (0x1C0, 0x258) if old else (0x1D0, 0x270)
+    ro_rva, ro_size, _ = image.sections[b".rdata"]
+    if not all(table % 8 == 0 and ro_rva <= table <= ro_rva + ro_size - renderer_slot - 8
+               for table in (standalone_table, vtable)):
+        return None
+    if any(image.read("Q", image.offset(standalone_table + slot)) !=
+           image.read("Q", image.offset(vtable + slot)) for slot in (palette_slot, renderer_slot)):
+        return None
+    return {
+        "zero_branch": f"0x{zero:X}",
+        "zero_vtable": f"0x{standalone_table:X}",
+        "nonzero_argument_store": f"0x{nonzero + saved_argument.start(1) - 3:X}",
+        "nonzero_argument_offset": f"0x{struct.unpack('<I', saved_argument[1])[0] - 0x18:X}",
+    }
+
+
 def search_grid_candidates(image, rva, code):
     ranges = dict(image.function_ranges())
     imports = {slot: symbol for _, symbol, slot in image.imports()}
@@ -733,8 +761,9 @@ def search_grid_candidates(image, rva, code):
         rb"\x48\x8b\x1d(.{4})\x48\x8b\xb8(.{4})\x49\x8b\x46\x60\xff\x50\x40"
         rb"\x49\x8d\x96(.{4})\x4c\x8b\xcb\x4c\x8b\xc0"
         rb"(?:\x49\x8b\xcc|\x49\x8b\xcf)\xff\xd7", re.S)
-    for record, factory, (_, target) in registered_factories(image, rva, code, SEARCH_GRID_CLASS_ID):
-        if not rva <= target < ranges.get(target, 0) <= rva + len(code):
+    for record, factory, (zero, target) in registered_factories(image, rva, code, SEARCH_GRID_CLASS_ID):
+        if not all(rva <= branch < ranges.get(branch, 0) <= rva + len(code)
+                   for branch in (zero, target)):
             continue
         for setup in factory_pattern.finditer(code, target - rva, ranges[target] - rva):
             allocator = rva + setup.end(2) + struct.unpack("<i", setup[2])[0]
@@ -775,6 +804,8 @@ def search_grid_candidates(image, rva, code):
                             "nonzero_branch": f"0x{target:X}",
                             "constructor": f"0x{constructor:X}",
                             "vtable": f"0x{vtable:X}",
+                            "factory_identity": search_grid_factory_identity(
+                                image, rva, code, ranges, zero, target, vtable, method_slot == 0x1C0),
                             "allocation_size": struct.unpack("<I", setup[1])[0],
                             "field_offset": f"0x{struct.unpack('<I', assignment[2])[0]:X}",
                             "style_key": -13,

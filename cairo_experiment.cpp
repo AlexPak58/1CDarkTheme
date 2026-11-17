@@ -1,4 +1,7 @@
 #include "platform.hpp"
+#ifdef THEME_TOOLTIP_TRACE
+#include "tooltip_trace.hpp"
+#endif
 
 #include <intrin.h>
 #include <atomic>
@@ -29,10 +32,18 @@ ImportHook hooks[] = {
     {sourceRgbSlot, "cairo_set_source_rgb", reinterpret_cast<PVOID>(&setSourceRgb)},
     {sourceRgbaSlot, "cairo_set_source_rgba", reinterpret_cast<PVOID>(&setSourceRgba)},
 };
+#ifdef THEME_TOOLTIP_TRACE
+constexpr size_t firstHook = 1;
+constexpr size_t hookCount = std::size(hooks);
+SRWLOCK traceLock = SRWLOCK_INIT;
+TooltipTrace trace;
+#else
+constexpr size_t firstHook = 0;
 #ifdef THEME_BACKGROUND_ONLY
 constexpr size_t hookCount = 1;
 #else
 constexpr size_t hookCount = std::size(hooks);
+#endif
 #endif
 ULONG_PTR frameBase;
 ULONG_PTR graphicsBase;
@@ -67,6 +78,42 @@ bool isTreeFill(const ULONG_PTR* stack)
            isTreeReceiver(stack, 0x600);
 }
 
+#ifdef THEME_TOOLTIP_TRACE
+bool isExpandedTooltip(const ULONG_PTR* stack)
+{
+    const auto stackTop = reinterpret_cast<ULONG_PTR>(
+        reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
+    const auto address = reinterpret_cast<ULONG_PTR>(stack);
+    // Walk the verified fixed stack frames back to frame.dll's tooltip renderer.
+    return address <= stackTop && stackTop - address >= 0x948 &&
+           stack[0x40 / 8] == graphicsBase + 0x1366E &&
+           stack[0x2A0 / 8] == graphicsBase + 0x4911 &&
+           stack[0x470 / 8] == graphicsBase + 0x9277 &&
+           stack[0x500 / 8] == graphicsBase + 0x25BB6 &&
+           stack[0x6A0 / 8] == graphicsBase + 0x5977 &&
+           stack[0x810 / 8] == graphicsBase + 0x9D45 &&
+           stack[0x940 / 8] == frameBase + 0x5FC7F5;
+}
+
+void countTooltipColor(double red, double green, double blue, double alpha)
+{
+    const auto isChannel = [](double value) { return value >= 0 && value <= 1; };
+    if (!isChannel(red) || !isChannel(green) || !isChannel(blue) || !isChannel(alpha)) return;
+    const auto byte = [](double value) { return static_cast<DWORD>(value * 255.0 + 0.5); };
+    const DWORD rgba = (byte(red) << 24) | (byte(green) << 16) | (byte(blue) << 8) | byte(alpha);
+    AcquireSRWLockExclusive(&traceLock);
+    DWORD* count = &trace.otherCalls;
+    for (auto& color : trace.colors) {
+        if (color.calls && color.rgba != rgba) continue;
+        color.rgba = rgba;
+        count = &color.calls;
+        break;
+    }
+    if (*count != MAXDWORD) ++*count;
+    ReleaseSRWLockExclusive(&traceLock);
+}
+#endif
+
 void setSourceRgb(void* context, double red, double green, double blue)
 {
     // The verified grphcs function ends in a tail jump through this IAT slot.
@@ -87,6 +134,9 @@ void setSourceRgba(void* context, double red, double green, double blue, double 
     if (reinterpret_cast<ULONG_PTR>(_ReturnAddress()) == graphicsBase + 0x2336 &&
         enabled.load(std::memory_order_relaxed)) {
         const auto* stack = static_cast<const ULONG_PTR*>(_AddressOfReturnAddress());
+#ifdef THEME_TOOLTIP_TRACE
+        if (isExpandedTooltip(stack)) countTooltipColor(red, green, blue, alpha);
+#else
         const auto stackTop = reinterpret_cast<ULONG_PTR>(
             reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
         const auto remaining = stackTop - reinterpret_cast<ULONG_PTR>(stack);
@@ -105,6 +155,7 @@ void setSourceRgba(void* context, double red, double green, double blue, double 
             green = 0xF2 / 255.0;
             blue = 0xC2 / 255.0;
         }
+#endif
     }
     reinterpret_cast<SetSourceRgba>(hooks[1].original)(context, red, green, blue, alpha);
 }
@@ -119,7 +170,7 @@ DWORD resolveHooks()
         !matchesSha256(modulePath(frame), frameHash) ||
         !matchesSha256(modulePath(graphics), graphicsHash)) return ERROR_REVISION_MISMATCH;
 
-    for (size_t i = 0; i < hookCount; ++i) {
+    for (size_t i = firstHook; i < hookCount; ++i) {
         hooks[i].original = reinterpret_cast<PVOID>(GetProcAddress(cairo, hooks[i].name));
         if (!hooks[i].original) return ERROR_PROC_NOT_FOUND;
     }
@@ -129,26 +180,26 @@ DWORD resolveHooks()
         return GetLastError();
     frameBase = reinterpret_cast<ULONG_PTR>(frame);
     graphicsBase = reinterpret_cast<ULONG_PTR>(graphics);
-    for (size_t i = 0; i < hookCount; ++i)
+    for (size_t i = firstHook; i < hookCount; ++i)
         hooks[i].slot = reinterpret_cast<PVOID volatile*>(graphicsBase + hooks[i].offset);
     return ERROR_SUCCESS;
 }
 
 DWORD setHook(bool on)
 {
-    if (!hooks[0].slot) {
+    if (!hooks[firstHook].slot) {
         if (!on) return ERROR_SUCCESS;
         const auto error = resolveHooks();
         if (error) return error;
     }
     if (!on) enabled.store(false, std::memory_order_relaxed);
-    auto* address = const_cast<PVOID*>(hooks[0].slot);
-    const auto size = hooks[hookCount - 1].offset - hooks[0].offset + sizeof(PVOID);
+    auto* address = const_cast<PVOID*>(hooks[firstHook].slot);
+    const auto size = hooks[hookCount - 1].offset - hooks[firstHook].offset + sizeof(PVOID);
     DWORD protection{};
     if (!VirtualProtect(address, size, PAGE_READWRITE, &protection)) return GetLastError();
     DWORD error = ERROR_SUCCESS;
     bool changed[hookCount]{};
-    for (size_t i = 0; i < hookCount; ++i) {
+    for (size_t i = firstHook; i < hookCount; ++i) {
         const auto& hook = hooks[i];
         const auto expected = on ? hook.original : hook.replacement;
         const auto replacement = on ? hook.replacement : hook.original;
@@ -158,7 +209,7 @@ DWORD setHook(bool on)
     }
     DWORD ignored{};
     if (error && on) {
-        for (size_t i = 0; i < hookCount; ++i) {
+        for (size_t i = firstHook; i < hookCount; ++i) {
             const auto& hook = hooks[i];
             if (changed[i]) InterlockedCompareExchangePointer(hook.slot, hook.original, hook.replacement);
         }
@@ -169,6 +220,18 @@ DWORD setHook(bool on)
 }
 
 } // namespace
+
+#ifdef THEME_TOOLTIP_TRACE
+extern "C" __declspec(dllexport) DWORD WINAPI ReadTooltipTrace(LPVOID output)
+{
+    if (!output) return ERROR_INVALID_PARAMETER;
+    AcquireSRWLockExclusive(&traceLock);
+    *static_cast<TooltipTrace*>(output) = trace;
+    trace = {};
+    ReleaseSRWLockExclusive(&traceLock);
+    return ERROR_SUCCESS;
+}
+#endif
 
 extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
 {

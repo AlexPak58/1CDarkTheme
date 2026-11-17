@@ -1,4 +1,7 @@
 #include "platform.hpp"
+#ifdef THEME_TOOLTIP_TRACE
+#include "tooltip_trace.hpp"
+#endif
 
 #include <tlhelp32.h>
 #include <charconv>
@@ -48,15 +51,23 @@ DWORD remoteCall(HANDLE child, ULONG_PTR address, LPVOID arg, DWORD& result)
     return GetExitCodeThread(worker, &result) ? ERROR_SUCCESS : GetLastError();
 }
 
-DWORD loadTheme(HANDLE child, DWORD pid, const std::wstring& dll, ULONG_PTR& setter,
-                const char* exportName)
+DWORD themeExportRva(const std::wstring& dll, const char* exportName, ULONG_PTR& exportRva)
 {
     const auto image = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
     if (!image) return GetLastError();
     const auto exportAddress = reinterpret_cast<ULONG_PTR>(GetProcAddress(image, exportName));
-    const auto exportRva = exportAddress - reinterpret_cast<ULONG_PTR>(image);
     FreeLibrary(image);
     if (!exportAddress) return ERROR_PROC_NOT_FOUND;
+    exportRva = exportAddress - reinterpret_cast<ULONG_PTR>(image);
+    return ERROR_SUCCESS;
+}
+
+DWORD loadTheme(HANDLE child, DWORD pid, const std::wstring& dll, ULONG_PTR& setter,
+                const char* exportName)
+{
+    ULONG_PTR exportRva{};
+    const DWORD exportError = themeExportRva(dll, exportName, exportRva);
+    if (exportError) return exportError;
 
     const auto load = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW");
     HMODULE localOwner{};
@@ -83,6 +94,36 @@ DWORD loadTheme(HANDLE child, DWORD pid, const std::wstring& dll, ULONG_PTR& set
     setter = base + exportRva;
     return ERROR_SUCCESS;
 }
+
+#ifdef THEME_TOOLTIP_TRACE
+DWORD readTooltipTrace(HANDLE child, DWORD pid, const std::wstring& dll)
+{
+    const auto base = remoteModule(pid, dll);
+    if (!base) return ERROR_MOD_NOT_FOUND;
+    ULONG_PTR exportRva{};
+    DWORD error = themeExportRva(dll, "ReadTooltipTrace", exportRva);
+    if (error) return error;
+
+    TooltipTrace trace{};
+    const auto output = VirtualAllocEx(child, nullptr, sizeof(trace), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!output) return GetLastError();
+    DWORD result{};
+    error = remoteCall(child, base + exportRva, output, result);
+    if (error == WAIT_TIMEOUT) return error;
+    if (!error) error = result;
+    if (!error && !ReadProcessMemory(child, output, &trace, sizeof(trace), nullptr)) error = GetLastError();
+    VirtualFreeEx(child, output, 0, MEM_RELEASE);
+    if (error) return error;
+
+    std::puts("Expanded tooltip RGBA (counts since previous read):");
+    for (const auto& color : trace.colors) {
+        if (color.calls) std::printf("  #%08lX %lu\n", color.rgba, color.calls);
+    }
+    std::printf("  Other calls: %lu\n", trace.otherCalls);
+    std::fflush(stdout);
+    return ERROR_SUCCESS;
+}
+#endif
 
 bool serverRef(const std::wstring& target)
 {
@@ -315,8 +356,13 @@ int wmain(int argc, wchar_t** argv)
     const Handle child(process.hProcess);
     CloseHandle(process.hThread);
     if (profileMode) return applyLaunchProfile(child, process.dwProcessId, dll, profile);
+#ifdef THEME_TOOLTIP_TRACE
+    std::printf("Started Configurator PID %lu.\n", process.dwProcessId);
+    std::puts("Enter e to enable the trace, d to disable it, t to read and reset, or q to quit.");
+#else
     std::printf("Started Configurator PID %lu. Open the target tree first.\n", process.dwProcessId);
     std::puts("Enter e to enable, d to disable, q to close this launcher.");
+#endif
 #ifdef THEME_BENCHMARK
     std::puts("Enter b to measure 300 synchronous redraws of the target window.");
 #endif
@@ -326,6 +372,14 @@ int wmain(int argc, wchar_t** argv)
     for (char input[32]; std::fgets(input, sizeof(input), stdin); ) {
         const char action = input[0];
         if (action == 'q') break;
+#ifdef THEME_TOOLTIP_TRACE
+        if (action == 't') {
+            const auto error = readTooltipTrace(child, process.dwProcessId, dll);
+            if (error) std::fprintf(stderr, "Reading tooltip trace failed: %lu\n", error);
+            if (error == WAIT_TIMEOUT) return 1;
+            continue;
+        }
+#endif
 #ifdef THEME_BENCHMARK
         if (action == 'b') {
             if (!benchmark(child, process.dwProcessId))
@@ -355,8 +409,12 @@ int wmain(int argc, wchar_t** argv)
             if (error == WAIT_TIMEOUT) return 1;
             continue;
         }
+#ifdef THEME_TOOLTIP_TRACE
+        std::puts(action == 'e' ? "Tooltip trace enabled." : "Tooltip trace disabled.");
+#else
         std::puts(action == 'e' ? "Theme enabled. Repaint the tree." :
                                   "Theme disabled. Repaint the tree.");
+#endif
         std::fflush(stdout);
     }
     if (setter && WaitForSingleObject(child, 0) == WAIT_TIMEOUT) {

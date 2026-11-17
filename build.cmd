@@ -20,6 +20,11 @@ if /i "%~2"=="cairo-bg" (
     set "THEME_DLL_FLAGS=/DTHEME_BACKGROUND_ONLY"
     set "THEME_LAUNCHER_FLAGS=/DTHEME_BENCHMARK"
 )
+if /i "%~2"=="tooltip-trace" (
+    set "THEME_SOURCE=cairo_experiment.cpp"
+    set "THEME_DLL_FLAGS=/DTHEME_TOOLTIP_TRACE"
+    set "THEME_LAUNCHER_FLAGS=/DTHEME_TOOLTIP_TRACE"
+)
 if /i "%~2"=="int3" set "THEME_LAUNCHER_FLAGS=/DTHEME_BENCHMARK"
 if /i "%~2"=="int3-bg" (
     set "THEME_DLL_FLAGS=/DTHEME_BACKGROUND_ONLY"

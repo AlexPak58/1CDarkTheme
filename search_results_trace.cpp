@@ -58,6 +58,7 @@ std::atomic<DWORD> otherCreations{};
 std::atomic<DWORD> resultsBackgrounds{};
 std::atomic<DWORD> otherBackgrounds{};
 std::atomic<DWORD> replacedCairoFills{};
+std::atomic<DWORD> replacedRowFills{};
 
 struct GridCandidate {
     ULONG_PTR address;
@@ -96,16 +97,35 @@ bool isSearchBackground(const ULONG_PTR* stack)
         matchesCandidate(stack[0x198 / 8]);
 }
 
+bool isSearchRow(const ULONG_PTR* stack)
+{
+    const auto top = reinterpret_cast<ULONG_PTR>(
+        reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
+    const auto address = reinterpret_cast<ULONG_PTR>(stack);
+    if (address > top || top - address < 0x608 ||
+        stack[0x220 / 8] != paintFrameBase + 0x303466 ||
+        stack[0x600 / 8] != paintFrameBase + 0x8117F5) return false;
+    const auto window = stack[0x5E0 / 8];
+    return window > 0x100 && matchesCandidate(window - 0x100);
+}
+
 void setSearchSourceRgb(void* context, double red, double green, double blue)
 {
     if (reinterpret_cast<ULONG_PTR>(_ReturnAddress()) == graphicsBase + 0xAEE56 &&
         red == 1.0 && green == 1.0 && blue == 1.0 &&
-        collecting.load(std::memory_order_acquire) &&
-        isSearchBackground(static_cast<const ULONG_PTR*>(_AddressOfReturnAddress()))) {
-        red = 0xBD / 255.0;
-        green = 0xD5 / 255.0;
-        blue = 0xEA / 255.0;
-        replacedCairoFills.fetch_add(1, std::memory_order_relaxed);
+        collecting.load(std::memory_order_acquire)) {
+        const auto* stack = static_cast<const ULONG_PTR*>(_AddressOfReturnAddress());
+        if (isSearchBackground(stack)) {
+            red = 0xBD / 255.0;
+            green = 0xD5 / 255.0;
+            blue = 0xEA / 255.0;
+            replacedCairoFills.fetch_add(1, std::memory_order_relaxed);
+        } else if (isSearchRow(stack)) {
+            red = 0xDC / 255.0;
+            green = 0xED / 255.0;
+            blue = 0xCC / 255.0;
+            replacedRowFills.fetch_add(1, std::memory_order_relaxed);
+        }
     }
     reinterpret_cast<SetSourceRgb>(originalCairoRgb)(context, red, green, blue);
 }
@@ -383,7 +403,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(void* setting)
     return error;
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV4(void* output)
+extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV5(void* output)
 {
     if (!output) return ERROR_INVALID_PARAMETER;
     SearchResultsTrace trace{
@@ -400,6 +420,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV4(void* out
         resultsBackgrounds.exchange(0, std::memory_order_relaxed),
         otherBackgrounds.exchange(0, std::memory_order_relaxed),
         replacedCairoFills.exchange(0, std::memory_order_relaxed),
+        replacedRowFills.exchange(0, std::memory_order_relaxed),
     };
     for (size_t i = 0; i < whiteWrites.size(); ++i)
         trace.whiteWrites[i] = whiteWrites[i].exchange(0, std::memory_order_relaxed);

@@ -11160,3 +11160,81 @@ Receipt отдельно фиксирует наблюдения UI, numeric-rev
 адресная очистка. Принятые пакеты, активная B3, config/preset и новое
 C2-дерево сохранены. Чистое B3-worktree удалено штатным git worktree remove
 после подтверждения интеграции a6de344 в GitHub main746a100.
+
+##### ARGB32 бегунков: ограничение текущего production mapper
+
+Read-only проверка исходника71afdfa установила: scroller_png.hpp identify
+допускает статические track/arrow routes, не resized-thumb route. clone
+поддерживает parts0/1/3 и размеры16×21/16×70 (либо транспонированные).
+exactSurface требует IMAGE/RGB24, stride=width×4, scale1/1,offset0/0;
+новая поверхность тоже создаётся RGB24. paintPixels/blendArrow пишут
+только24битаRGB. У неподтверждённых surface/route hook вызывает original
+с исходной поверхностью; source не изменяется, ownedclone освобождается
+после получения pattern. Поэтому alpha/transform новых B3 сохраняются
+через pass-through, а не через уже готовую перекраску ARGB32.
+
+Нельзя просто разрешить format0 в текущем mapper. Для будущего отдельного
+thumb clone нужны сохранение alpha coverage и premultiplied RGB, исходных
+dimensions/piece geometry, построчный stride без изменения padding,
+scale/offset, source immutability, flush/markDirty и владение surface/pattern.
+Семантика форматов: [официальная справка Cairo Image Surfaces](https://www.cairographics.org/manual/cairo-Image-Surfaces.html).
+Сам ARGB32 format не доказывает наличие полупрозрачных пикселей: их C1/B3
+не читали. Ширина20 вместо16 не доказывает DPI-причину.
+
+Предложена, но ещё не выполнена offline Cairo-фикстура RGB24(16px) и
+ARGB32(20px), synthetic alpha0/64/128/255, paddedstride, scale1/1.25/2 и
+ненулевые offsets. Для текущей v10 ожидание — безопасный pass-through
+неподдержанных вариантов; будущий thumb clone отдельно проверит alpha,
+premultiplication, размеры/transform, неизменность source/padding и lifetime.
+
+#### C2 готова: причины отказа ID11 и гистограмма типов окон
+
+C1 показала только общий WindowTables. Исходник C2 `51e86b9` разделяет
+восемь mismatch-предикатов W/context/anchor/method/root/view/draw/backlink
+и14 read/imageTable-отказов, сохраняя прежние порядок чтения и допуск.
+В числовой гистограмме — только уже прочитанная W-table как moduleId/RVA
+в пределах SizeOfImage закреплённых frame/txtedui/wbase; неизвестные
+адреса сводятся к Other/0. Heap/absolute-адреса, строки и пиксели не пишутся.
+16 групп чужих окон и16 отдельно зарезервированных групп exactF3C18
+предотвращают вытеснение целевого типа потоком чужих перерисовок.
+Контекст/метод/root values не записываются; их первые причины различаются.
+
+ABI2: diagnostics992, trace6320 байт, sample40. Экспорты
+RunPropertyTextProbeV2/PropertyTextProbeAbiV2; старый ABI1 отвергается.
+Capture60с/wait90с, lifetime/hash/debugger/page/replay/rollback проверки
+не изменены. Эта подготовка не расходует следующую живую попытку C.
+
+Actual helpers собраны x64 /W4 /WX; все шесть целевых native fixtures
+прошли (четыре старых — initial log, два C2 — final recheck). Первоначальные
+синтетические ожидания с соседними fake-module ranges и уже занятым reason
+в резерве исправлены в fixture; selector не менялся. CLI отвергает неверную
+команду exit2. Полные native/managed suites повторно не запускались.
+
+Независимое ревью нашло два P2 в проверке ответа helper: принимались
+drops при незаполненной корзине и несовместимые reason/W-token.
+Исправление `22259207e4da9f026290f6bcced7c38388f788e2` затрагивает только
+launcher и его fixture: drops требуют used16; WindowTable требует чужой
+W; ReadInput/ReadWindow — Other/0; ранние ReadContext/ReadAnchor допускают
+любой санитаризированный token; остальные причины требуют exactF3C18.
+Отрицательные и положительные проверки, повторная сборка helper и
+независимое повторное ревью — PASS. DLL/selector не пересобирались.
+
+Пакет `artifacts/1c-dark-theme/property-text-c2-2225920` —13 файлов+manifest.
+Manifest SHA-256 `89DC3BB990CC92BB81DAA187188FC866D48565F374253E709510B7D9EDAC146F`.
+DLL SHA-256 `44EC4B81B3F53EC2A9EAC8BAA289EF92E02066BE1C4C969EF924F9AE954EBAA9`;
+helper `AF1994CE55445D01A1CD8CD4D2FE58F7D2F38765C8D5C16D6B7BF846254D6EB1`.
+DLL построена на51e86b9, helper на2225920; точные байты build-tree и
+история отрицательных проверок сохранены. В main интегрировано4069316.
+
+Уровень C2 — source/build/package, live=not-run. Управление экраном не
+возобновлялось: вопрос о приоритете конкурирующего UI остаётся без ответа.
+Активная B3 после истечения capture применяет прежний dark preset только
+к BPDemo294316; возврат обычного v10 tray с общим охватом ожидает штатного
+закрытия и запуска. Общая цель активна. Следующий переход: восстановить v10
+при стабильном экране, затем C2; отдельно завершить редакторV/H в B3.
+
+Финальная независимая проверка пакета — PASS:13файлов, размеры/хеши,
+11 source hashes (точные байты build-tree и эквивалентность коммиту с
+учётом EOL), AMD64/V2; ABI-функция возвращает2. Исходный receipt сохранён
+как снимок этапа сборки со старым `Independent review pending`; итог
+последующего ревью находится в review.json. Это не live-подтверждение.

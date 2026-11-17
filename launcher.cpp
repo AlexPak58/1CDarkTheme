@@ -225,6 +225,8 @@ DWORD readTrace(HANDLE child, DWORD pid, const std::wstring& dll)
 
 bool serverRef(const std::wstring& target)
 {
+    if (std::filesystem::path(target).is_absolute() && target.find_first_of(L"\"\r\n") == std::wstring::npos)
+        return std::filesystem::is_regular_file(std::filesystem::path(target) / L"1Cv8.1CD");
     const auto slash = target.find(L'\\');
     return slash != std::wstring::npos && slash != 0 && slash + 1 < target.size() &&
            target.find(L'\\', slash + 1) == std::wstring::npos &&
@@ -405,17 +407,17 @@ int wmain(int argc, wchar_t** argv)
     const bool designer = argc == 4 && std::wstring_view(argv[3]) == L"--designer";
     if (designer) --argc;
     if (argc != 3 || !serverRef(argv[2])) {
-        std::fputs("Usage: tree-theme-run.exe <1cv8c.exe or 1cv8.exe> <server\\ref> [--designer]\n", stderr);
+        std::fputs("Usage: tree-theme-run.exe <1cv8c.exe or 1cv8.exe> <server\\ref or absolute base directory> [--designer]\n", stderr);
         return 2;
     }
 #elif defined(THEME_FORM_LINE_TRACE)
     if (argc != 3 || !serverRef(argv[2])) {
-        std::fputs("Usage: tree-theme-run.exe <1cv8c.exe or 1cv8.exe> <server\\ref>\n", stderr);
+        std::fputs("Usage: tree-theme-run.exe <1cv8c.exe or 1cv8.exe> <server\\ref or absolute base directory>\n", stderr);
         return 2;
     }
 #elif defined(THEME_SEARCH_RESULTS_TRACE)
     if (argc != 3 || !serverRef(argv[2])) {
-        std::fputs("Usage: tree-theme-run.exe <1cv8.exe> <server\\ref>\n", stderr);
+        std::fputs("Usage: tree-theme-run.exe <1cv8.exe> <server\\ref or absolute base directory>\n", stderr);
         return 2;
     }
 #endif
@@ -441,10 +443,10 @@ int wmain(int argc, wchar_t** argv)
         }
     }
     if (argc < 3 || !serverRef(argv[2])) {
-        std::fputs("Usage: tree-theme-run.exe <1cv8.exe> <server\\ref>"
+        std::fputs("Usage: tree-theme-run.exe <1cv8.exe> <server\\ref or absolute base directory>"
                    " [--caption] [--bars] [--properties] [--workspace] [--status-bar]"
                    " [--window-tabs] [--tree-tabs]\n"
-                   "       tree-theme-run.exe <1cv8.exe> <server\\ref> --palette <mask>:<RGB,...>\n", stderr);
+                   "       tree-theme-run.exe <1cv8.exe> <server\\ref or absolute base directory> --palette <mask>:<RGB,...>\n", stderr);
         return 2;
     }
     if (!selection) selection = enableTreeOnly;
@@ -460,7 +462,7 @@ int wmain(int argc, wchar_t** argv)
         std::fputs("Unsupported client hash or mode for spreadsheet tracing. See RESEARCH.md.\n", stderr);
 #else
     if (!matchesSha256(exe, exeHash)) {
-        std::fputs("Unsupported 1cv8.exe (expected 8.3.27.2325 x64).\n", stderr);
+        std::fputs("Unsupported 1cv8.exe (expected 8.3.27.2130 x64).\n", stderr);
 #endif
         return 2;
     }
@@ -486,7 +488,7 @@ int wmain(int argc, wchar_t** argv)
 #else
     const wchar_t* mode = L" DESIGNER ";
 #endif
-    std::wstring command = L"\"" + exe + L"\"" + mode + L"/S\"" + argv[2] + L"\" /WA+";
+    std::wstring command = L"\"" + exe + L"\"" + mode + (std::filesystem::path(argv[2]).is_absolute() ? L"/F\"" : L"/S\"") + std::wstring(argv[2]) + L"\" /WA+";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};

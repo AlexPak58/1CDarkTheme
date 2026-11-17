@@ -29,7 +29,7 @@
 
         <StackPanel>
             <TextBlock Text="Тема Конфигуратора 1С" FontSize="28" FontWeight="SemiBold"/>
-            <TextBlock Margin="0,4,0,14" Text="Настройте цвета и запустите новый Конфигуратор • 8.3.27.2325 x64"/>
+            <TextBlock Margin="0,4,0,14" Text="Настройте цвета и запустите новый Конфигуратор • 8.3.27.2130 x64"/>
         </StackPanel>
 
         <Grid Grid.Row="1" Margin="0,0,0,12">
@@ -90,9 +90,9 @@
             <TextBox Grid.Row="1" Grid.Column="1" x:Name="PlatformPath" AutomationProperties.Name="Путь к 1cv8.exe"/>
             <Button Grid.Row="1" Grid.Column="2" Margin="8,0,0,0" Content="Обзор…" Click="BrowsePlatform"
                     AutomationProperties.Name="Выбрать 1cv8.exe"/>
-            <Label Grid.Row="2" Margin="0,5,10,0" Content="Серверная база" Target="{Binding ElementName=DatabaseTarget}" VerticalAlignment="Center"/>
+            <Label Grid.Row="2" Margin="0,5,10,0" Content="База 1С" Target="{Binding ElementName=DatabaseTarget}" VerticalAlignment="Center"/>
             <TextBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,5,0,0"
-                     x:Name="DatabaseTarget" ToolTip="Формат: сервер\база" AutomationProperties.Name="Серверная база: сервер\база"/>
+                     x:Name="DatabaseTarget" ToolTip="Сервер\база или полный путь к каталогу файловой базы" AutomationProperties.Name="База 1С: сервер\база"/>
         </Grid>
 
         <Grid Grid.Row="4" Margin="0,12,0,0">

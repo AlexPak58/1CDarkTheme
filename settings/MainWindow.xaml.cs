@@ -33,6 +33,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        PlatformPath.Text = @"C:\Program Files\1cv8\8.3.27.2130\bin\1cv8.exe";
         string? storeError = null;
         try
         {
@@ -320,11 +321,12 @@ public partial class MainWindow : Window
         }
         var target = DatabaseTarget.Text.Trim();
         var separator = target.IndexOf('\\');
-        if (separator <= 0 || separator == target.Length - 1 || target.LastIndexOf('\\') != separator
+        var fileBase = Path.IsPathFullyQualified(target) && File.Exists(Path.Combine(target, "1Cv8.1CD"));
+        if (!fileBase && (separator <= 0 || separator == target.Length - 1 || target.LastIndexOf('\\') != separator
             || target.Any(char.IsControl) || target.IndexOfAny(['"', ';', '/']) >= 0
-            || string.IsNullOrWhiteSpace(target[..separator]) || string.IsNullOrWhiteSpace(target[(separator + 1)..]))
+            || string.IsNullOrWhiteSpace(target[..separator]) || string.IsNullOrWhiteSpace(target[(separator + 1)..])))
         {
-            ShowStatus("Укажите серверную базу в формате сервер\\база.");
+            ShowStatus("Укажите сервер\\база или полный путь к каталогу файловой базы.");
             DatabaseTarget.Focus();
             return;
         }

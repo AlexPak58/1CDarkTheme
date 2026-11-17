@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "name": "Тёмная",
-  "paletteVersion": 5,
-  "mask": 7935,
+  "paletteVersion": 6,
+  "mask": 16127,
   "colors": [
     "#1F2938",
     "#80F2C2",
@@ -35,6 +35,8 @@
     "#878B8F",
     "#1F2938",
     "#3B4A60",
+    "#1F2938",
+    "#E5EBF5",
     "#1F2938",
     "#E5EBF5"
   ]

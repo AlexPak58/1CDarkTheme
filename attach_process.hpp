@@ -3,7 +3,7 @@
 #include "platform.hpp"
 #include <cwchar>
 
-inline constexpr char themeProfileAttachExport[] = "ThemeProfileAttachV5";
+inline constexpr char themeProfileAttachExport[] = "ThemeProfileAttachV6";
 inline constexpr DWORD themeStateUncertain = 0x20000001; // Application-defined Win32 code.
 
 struct DesignerWindow {

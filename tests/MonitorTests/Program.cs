@@ -84,11 +84,11 @@ await monitor.PollOnceAsync();
 Check(requests.Count == 1 && changes == 1, "Unchanged successful profile is neither reapplied nor republished");
 
 var updatedDark = dark with { Colors = [..dark.Colors] };
-updatedDark.Colors[0] = "#124578";
+updatedDark.Colors[33] = "#124578";
 PresetFile.Save(defaultPath, updatedDark);
 await monitor.PollOnceAsync();
 Check(requests.Count == 2 && requests[^1].Item2 == Palette.Encode(updatedDark.Mask, updatedDark.Colors),
-    "Changed contents at the same path reapply");
+    "Changed panel header color at the same path reapplies");
 
 config = config with { Rules = [new(null, platform, "Designer", "override.json")] };
 ThemeConfiguration.Save(configPath, config);
@@ -99,7 +99,7 @@ File.WriteAllText(overridePath, "{");
 await monitor.PollOnceAsync();
 Check(requests.Count == 3 && snapshot.Processes[0].Status == "preset_error" && snapshot.Processes[0].PresetPath == overridePath,
     "Invalid selected file retains the previous palette and surfaces the error");
-File.WriteAllText(overridePath, """{"schemaVersion":0,"name":"Invalid","paletteVersion":5,"mask":0,"colors":[]}""");
+File.WriteAllText(overridePath, """{"schemaVersion":0,"name":"Invalid","paletteVersion":6,"mask":0,"colors":[]}""");
 await monitor.PollOnceAsync();
 Check(requests.Count == 3 && snapshot.Processes[0].Status == "preset_error", "Invalid preset schema suspends writes");
 File.Delete(overridePath);

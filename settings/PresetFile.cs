@@ -11,7 +11,6 @@ internal sealed record LoadedPreset(Preset Preset, string Hash);
 internal static class PresetFile
 {
     private const int SchemaVersion = 1;
-    private const int PaletteVersion = 5;
 
     private sealed record Document(
         [property: JsonRequired] int SchemaVersion,
@@ -31,8 +30,8 @@ internal static class PresetFile
 
     public static string Save(string path, Preset preset, string? expectedHash = null)
     {
-        var normalized = Normalize(preset.Name, preset.Mask, preset.Colors, PaletteVersion);
-        return ThemeJson.Write(path, new Document(SchemaVersion, normalized.Name, PaletteVersion,
+        var normalized = Normalize(preset.Name, preset.Mask, preset.Colors, Palette.Version);
+        return ThemeJson.Write(path, new Document(SchemaVersion, normalized.Name, Palette.Version,
                                                   normalized.Mask, normalized.Colors), expectedHash);
     }
 
@@ -45,15 +44,7 @@ internal static class PresetFile
 
     private static Preset Normalize(string name, int mask, string[] colors, int version)
     {
-        var (maxMask, colorCount) = version switch
-        {
-            1 => (511, 25),
-            2 => (1023, 29),
-            3 => (2047, 30),
-            4 => (4095, 31),
-            PaletteVersion => (Palette.AllZones, Palette.ColorCount),
-            _ => throw new InvalidDataException("Неподдерживаемая версия палитры.")
-        };
+        var (maxMask, colorCount) = Palette.Shape(version);
         if (!Palette.IsValidName(name) || mask < 0 || mask > maxMask || colors?.Length != colorCount)
             throw new InvalidDataException("Недопустимое имя, набор зон или число цветов в пресете.");
 

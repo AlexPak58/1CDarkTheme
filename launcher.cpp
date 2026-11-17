@@ -251,7 +251,7 @@ bool serverRef(const std::wstring& target)
 bool parseProfile(std::wstring_view input, ThemeProfile& profile)
 {
     const auto separator = input.find(L':');
-    if (separator == std::wstring_view::npos || separator == 0 || separator > 4)
+    if (separator == std::wstring_view::npos || separator == 0 || separator > 5)
         return false;
     DWORD zones{};
     for (const wchar_t digit : input.substr(0, separator)) {
@@ -259,16 +259,18 @@ bool parseProfile(std::wstring_view input, ThemeProfile& profile)
         zones = zones * 10 + (digit - L'0');
     }
     if (zones > themeZoneMask) return false;
-    profile.zones = zones;
     input.remove_prefix(separator + 1);
     if ((input.size() + 1) % 7 != 0) return false;
     const size_t colorCount = (input.size() + 1) / 7;
     if (colorCount != paletteColorCount &&
+        !(colorCount == panelHeaderBackground && zones < enablePanelHeaders) &&
         !(colorCount == searchResultsBackground && zones < enableSearchResults) &&
         !(colorCount == toolbarBorder && zones < enableToolbarBorder) &&
         !(colorCount == toolbarBandBackground && zones < enableToolbarBand) &&
         !(colorCount == popupMenuBackground && zones < enablePopupMenu))
         return false;
+    ThemeProfile parsedProfile;
+    parsedProfile.zones = zones;
     for (size_t i = 0; i < colorCount; ++i) {
         char hex[6];
         for (size_t digit = 0; digit < sizeof(hex); ++digit) {
@@ -276,13 +278,14 @@ bool parseProfile(std::wstring_view input, ThemeProfile& profile)
             hex[digit] = static_cast<char>(input[digit]);
         }
         const auto end = hex + sizeof(hex);
-        const auto parsed = std::from_chars(hex, end, profile.colors[i], 16);
+        const auto parsed = std::from_chars(hex, end, parsedProfile.colors[i], 16);
         if (parsed.ec != std::errc{} || parsed.ptr != end) return false;
         if (i + 1 < colorCount) {
             if (input[sizeof(hex)] != L',') return false;
             input.remove_prefix(sizeof(hex) + 1);
         }
     }
+    profile = parsedProfile;
     return true;
 }
 
@@ -792,8 +795,8 @@ int wmain(int argc, wchar_t** argv)
     const bool profileMode = argc == 5 && std::wstring_view(argv[3]) == L"--palette";
     ThemeProfile profile;
     if (profileMode && !parseProfile(argv[4], profile)) {
-        std::fputs("Invalid palette. Expected a zone mask and 33 six-digit RGB colors "
-                   "(25, 29, 30 or 31 for legacy palettes).\n", stderr);
+        std::fputs("Invalid palette. Expected a zone mask and 35 six-digit RGB colors "
+                   "(25, 29, 30, 31 or 33 for legacy palettes).\n", stderr);
         return 2;
     }
     ULONG_PTR selection{};

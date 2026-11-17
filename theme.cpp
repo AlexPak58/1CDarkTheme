@@ -2,6 +2,7 @@
 #include "attach_process.hpp"
 #include "list_identity.hpp"
 #include "devtool_binding.hpp"
+#include "panel_headers.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -47,7 +48,8 @@ struct Site {
     BYTE length{3};
 };
 
-enum SiteIndex { rowFill, emptyFill, labelColor, workspaceFill, treeTabFill, treeTabText, toolbarEdgeStroke };
+enum SiteIndex { rowFill, emptyFill, labelColor, workspaceFill, treeTabFill, treeTabText, toolbarEdgeStroke,
+    dockFrameFill, mdiFrameFill, dockTitleFill, panelCaptionText };
 Site sites[] = {
     {nullptr, {0x44, 0x8B, 0xC6}, 0}, // mov r8d, esi
     {nullptr, {0x0F, 0x45, 0xD0}, 0}, // cmovne edx, eax
@@ -56,6 +58,10 @@ Site sites[] = {
     {nullptr, {0x8B, 0xD8}, 0, 2},  // mov ebx, eax
     {nullptr, {0x44, 0x8B, 0xC0}, 0}, // mov r8d, eax
     {nullptr, {0x8B, 0xD7}, 0, 2},  // mov edx, edi
+    {nullptr, {0x48, 0x8B, 0xCE}, 0}, // mov rcx, rsi
+    {nullptr, {0x49, 0x8B, 0xCE}, 0}, // mov rcx, r14
+    {nullptr, {0x48, 0x8B, 0xCE}, 0}, // mov rcx, rsi
+    {nullptr, {0x49, 0x8B, 0xD4}, 0}, // mov rdx, r12
 };
 #ifdef THEME_BACKGROUND_ONLY
 constexpr size_t installedSiteCount = 2;
@@ -474,6 +480,14 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
             callerAt(regs, 0x1B8) == frameBase + 0x8BB658;
         regs.Rdx = toolbarEdge ? toBgr(colors.colors[toolbarBorder]) : original;
         length = sites[toolbarEdgeStroke].length;
+    } else if (event.ExceptionAddress == sites[dockFrameFill].address) {
+        panel_detail::apply(regs, frameBase, panel_detail::Paint::DockFrame, colors);
+    } else if (event.ExceptionAddress == sites[mdiFrameFill].address) {
+        panel_detail::apply(regs, frameBase, panel_detail::Paint::MdiFrame, colors);
+    } else if (event.ExceptionAddress == sites[dockTitleFill].address) {
+        panel_detail::apply(regs, frameBase, panel_detail::Paint::DockTitle, colors);
+    } else if (event.ExceptionAddress == sites[panelCaptionText].address) {
+        panel_detail::apply(regs, frameBase, panel_detail::Paint::Caption, colors);
     } else {
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -505,10 +519,19 @@ DWORD installSites()
     sites[treeTabFill].address = reinterpret_cast<BYTE*>(frameBase + 0x5D4B1E);
     sites[treeTabText].address = reinterpret_cast<BYTE*>(frameBase + 0x5D4104);
     sites[toolbarEdgeStroke].address = reinterpret_cast<BYTE*>(graphicsBase + 0xAEDA3);
+    for (size_t i = 0; i < panel_detail::patches.size(); ++i)
+        sites[dockFrameFill + i].address = reinterpret_cast<BYTE*>(frameBase + panel_detail::patches[i].rva);
     for (size_t i = 0; i < installedSiteCount; ++i) {
         const auto& site = sites[i];
         if (std::memcmp(site.address, site.instruction.data(), site.length) != 0)
             return ERROR_INVALID_DATA;
+    }
+    if (installedSiteCount == std::size(sites)) {
+        for (size_t i = 0; i < panel_detail::patches.size(); ++i) {
+            const auto& patch = panel_detail::patches[i];
+            if (std::memcmp(sites[dockFrameFill + i].address, patch.bytes.data(), patch.bytes.size()) != 0)
+                return ERROR_INVALID_DATA;
+        }
     }
 
     // The process owns the handler and these module addresses until exit.
@@ -654,7 +677,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
 }
 
 #ifndef THEME_BACKGROUND_ONLY
-extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV5(LPVOID)
+extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV6(LPVOID)
 {
     return themeProfileVersion;
 }

@@ -40,20 +40,25 @@ for (var i = 0; i < shippedNames.Length; i++)
 }
 
 var dark = Palette.BuiltIns[0];
+var headerZone = Palette.Zones.Single(zone => zone.Bit == 8192);
+Check(headerZone.Label == "Рамки и заголовки панелей" && headerZone.Offset == 33 &&
+      headerZone.Fields.SequenceEqual(["Фон рамки и заголовка", "Текст заголовка"]), "panel header editor fields");
 var firstPath = Path.Combine(run, "presets", "first.json");
 var secondPath = Path.Combine(run, "presets", "second.json");
 var firstHash = PresetFile.Save(firstPath, dark, "");
 var edited = dark with { Colors = [..dark.Colors] };
-edited.Colors[31] = " 1122cc ";
-edited.Colors[32] = "#99ff00";
+edited.Colors[33] = " 1122cc ";
+edited.Colors[34] = "#99ff00";
 var secondHash = PresetFile.Save(secondPath, edited, "");
 var first = PresetFile.Load(firstPath);
 var second = PresetFile.Load(secondPath);
 Check(first.Hash == firstHash && second.Hash == secondHash && first.Hash != second.Hash, "round-trip hashes");
-Check(first.Preset.Name == second.Preset.Name && first.Preset.Colors[31] != second.Preset.Colors[31], "same display name");
-Check(Palette.Encode(second.Preset.Mask, second.Preset.Colors).EndsWith(",1122CC,99FF00"), "normalization and CLI");
+Check(first.Preset.Name == second.Preset.Name && first.Preset.Colors[33] != second.Preset.Colors[33], "same display name");
+var cli = Palette.Encode(second.Preset.Mask, second.Preset.Colors);
+Check(cli.StartsWith("16127:") && cli.Split(',').Length == 35 && cli.EndsWith(",1122CC,99FF00"),
+      "normalized panel header colors and default mask are sent to CLI");
 using (var saved = JsonDocument.Parse(File.ReadAllText(secondPath)))
-    Check(saved.RootElement.GetProperty("paletteVersion").GetInt32() == 5, "saved v5");
+    Check(saved.RootElement.GetProperty("paletteVersion").GetInt32() == 6, "saved v6");
 Reject<IOException>(() => PresetFile.Save(firstPath, edited, secondHash));
 Reject<IOException>(() => PresetFile.Save(firstPath, edited, ""));
 Check(PresetFile.Load(firstPath).Hash == firstHash, "stale writes retained file");
@@ -79,13 +84,12 @@ Reject<InvalidDataException>(() => ThemeJson.Write(firstPath, new string('x', Th
 Check(PresetFile.Load(firstPath).Hash == replaced, "oversized output retained file");
 Reject<JsonException>(() => PresetFile.Parse("{invalid"));
 Reject<JsonException>(() => PresetFile.Parse("""{"schemaVersion":1,"schemaVersion":1}"""));
-Reject<JsonException>(() => PresetFile.Parse("""{"schemaVersion":1,"name":"X","paletteVersion":5,"colors":[]}"""));
-Reject<InvalidDataException>(() => PresetFile.Parse("""{"schemaVersion":1,"name":"X","paletteVersion":5,"mask":8192,"colors":[]}"""));
-Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Mask = 8192 }));
+Reject<JsonException>(() => PresetFile.Parse("""{"schemaVersion":1,"name":"X","paletteVersion":6,"colors":[]}"""));
+Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Mask = 16384 }));
 Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Colors = dark.Colors[..^1] }));
 Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Colors = [..dark.Colors[..^1], "zzzzzz"] }));
 
-foreach (var (version, count, mask) in new[] { (1, 25, 511), (2, 29, 1023), (3, 30, 2047), (4, 31, 4095) })
+foreach (var (version, count, mask) in new[] { (1, 25, 511), (2, 29, 1023), (3, 30, 2047), (4, 31, 4095), (5, 33, 8191) })
 {
     string Json(int selectedMask) => JsonSerializer.Serialize(new
     {
@@ -93,11 +97,20 @@ foreach (var (version, count, mask) in new[] { (1, 25, 511), (2, 29, 1023), (3, 
         colors = Enumerable.Repeat("abcdef", count)
     });
     var migrated = PresetFile.Parse(Json(mask));
-    Check(migrated.Mask == mask && migrated.Colors.Length == 33 &&
+    Check(migrated.Mask == mask && migrated.Colors.Length == 35 &&
           migrated.Colors.Take(count).All(c => c == "#ABCDEF") &&
           migrated.Colors.Skip(count).SequenceEqual(dark.Colors.Skip(count)), "legacy normalization");
     Reject<InvalidDataException>(() => PresetFile.Parse(Json(mask + 1)));
 }
+var legacyStore = new PresetStore();
+var legacyStoreColors = Enumerable.Repeat("#ABCDEF", 33).ToArray();
+File.WriteAllText(legacyStore.Path, JsonSerializer.Serialize(new
+{
+    Version = 5, Presets = new[] { new Preset("Сохранённая", 7935, legacyStoreColors) }
+}));
+var stored = legacyStore.Load().Single();
+Check(stored.Mask == 7935 && stored.Colors[..33].SequenceEqual(legacyStoreColors) &&
+      stored.Colors[33..].SequenceEqual(["#1F2938", "#E5EBF5"]), "v5 collection keeps mask and appends header defaults");
 
 var baseline = ThemeConfiguration.CreateDefault(configPath);
 Check(baseline.Enabled && baseline.DefaultPresetFile == "presets/dark.json", "initial relative default");

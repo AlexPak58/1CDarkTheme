@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "Штатные цвета",
-  "paletteVersion": 5,
+  "paletteVersion": 6,
   "mask": 0,
   "colors": [
     "#1F2938",
@@ -35,6 +35,8 @@
     "#878B8F",
     "#1F2938",
     "#3B4A60",
+    "#1F2938",
+    "#E5EBF5",
     "#1F2938",
     "#E5EBF5"
   ]

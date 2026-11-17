@@ -31,7 +31,7 @@ call "%CD%\build.cmd" "%OUT%\grid" grid-probe
 if errorlevel 1 goto failed
 call "%CD%\build.cmd" "%OUT%\frame" frame-probe
 if errorlevel 1 goto failed
-for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test devtool-binding-test global-search-test frame-probe-test frame-launcher-test) do (
+for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test devtool-binding-test global-search-test frame-probe-test frame-launcher-test panel-headers-test) do (
     cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /I. "%~dp0%%T.cpp" /Fo"%OUT%\%%T.obj" /Fe"%OUT%\%%T.exe" /link bcrypt.lib dwmapi.lib user32.lib
     if errorlevel 1 goto failed
 )
@@ -58,6 +58,8 @@ if errorlevel 1 goto failed
 "%OUT%\devtool-binding-test.exe"
 if errorlevel 1 goto failed
 "%OUT%\global-search-test.exe"
+if errorlevel 1 goto failed
+"%OUT%\panel-headers-test.exe"
 if errorlevel 1 goto failed
 "%OUT%\frame-probe-test.exe"
 if errorlevel 1 goto failed

@@ -73,6 +73,9 @@ int main(int argc, char** argv)
     check(argc == 2, "expected process mode");
     installationResult = ERROR_SUCCESS;  // Bypass production code patching in this standalone test.
     ThemeProfile profile;
+    check(profile.version == 6 && profile.size == 152 && profile.zones == 16127 &&
+          profile.colors[panelHeaderBackground] == 0x1F2938 && profile.colors[panelHeaderText] == 0xE5EBF5,
+          "native defaults include panel headers");
     profile.zones = enableSearchResults;
     if (std::strcmp(argv[1], "DESIGNER") != 0) {
         check(SetThemeProfile(&profile) == ERROR_NOT_SUPPORTED, "DLL rejects Enterprise mode");
@@ -126,6 +129,13 @@ int main(int argc, char** argv)
     check(first->zones == enableSearchResults && first->colors[searchResultsBackground] == 0x123456,
           "initial immutable snapshot");
     check(SetThemeProfile(&profile) == ERROR_SUCCESS && activeProfile.load() == first, "deduplicate");
+    profile.zones = enablePanelHeaders;
+    profile.colors[panelHeaderBackground] = 0x448855;
+    profile.colors[panelHeaderText] = 0xCCDDEE;
+    check(SetThemeProfile(&profile) == ERROR_SUCCESS &&
+          activeProfile.load()->zones == enablePanelHeaders &&
+          activeProfile.load()->colors[panelHeaderBackground] == 0x448855 &&
+          activeProfile.load()->colors[panelHeaderText] == 0xCCDDEE, "accept panel header palette in isolation");
     profile.zones = enableTreeOnly;
     profile.colors[treeBackground] = 0x345678;
     check(SetThemeProfile(&profile) == ERROR_SUCCESS, "second profile");

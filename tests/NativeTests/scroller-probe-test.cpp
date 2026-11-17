@@ -1,5 +1,6 @@
 #include "scroller_identity_probe.hpp"
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,7 +12,7 @@ BYTE* deniedRestore{};
 BYTE* deniedFlush{};
 LPCVOID deniedSlot{};
 ULONGLONG tick = 100;
-alignas(ULONG_PTR) std::array<ULONG_PTR, 0x3E000 / sizeof(ULONG_PTR)> scrollerImage{};
+alignas(ULONG_PTR) std::array<ULONG_PTR, 0x56000 / sizeof(ULONG_PTR)> scrollerImage{};
 const auto fakeWbase = reinterpret_cast<ULONG_PTR>(scrollerImage.data());
 
 BOOL WINAPI fixtureProtect(LPVOID address, SIZE_T size, DWORD protection, PDWORD previous)
@@ -39,10 +40,18 @@ SIZE_T WINAPI fixtureQuery(LPCVOID address, PMEMORY_BASIC_INFORMATION region, SI
 {
     const auto result = VirtualQuery(address, region, length);
     const auto value = reinterpret_cast<ULONG_PTR>(address);
-    if (result && value >= fakeWbase + 0x3C000 && value < fakeWbase + 0x3E000) {
+    if (result && value >= fakeWbase + 0x19000 && value < fakeWbase + 0x1C000) {
+        region->AllocationBase = scrollerImage.data();
+        region->Type = MEM_IMAGE;
+        region->Protect = PAGE_EXECUTE_READ;
+    } else if (result && value >= fakeWbase + 0x3C000 && value < fakeWbase + 0x3E000) {
         region->AllocationBase = scrollerImage.data();
         region->Type = MEM_IMAGE;
         region->Protect = PAGE_READONLY;
+    } else if (result && value >= fakeWbase + 0x55000 && value < fakeWbase + 0x56000) {
+        region->AllocationBase = scrollerImage.data();
+        region->Type = MEM_IMAGE;
+        region->Protect = PAGE_READWRITE;
     }
     if (result && address == deniedSlot) region->Protect = PAGE_NOACCESS;
     return result;
@@ -143,7 +152,8 @@ void testCapture()
     check(captureIdentity(dispatch, fakeWbase, ScrollerSite::Dispatch, id) == Observation::Accepted &&
           id.window.state == ScrollerLocationState::Image && id.caller.state == ScrollerLocationState::Image &&
           id.scroller.rva == fixtureTableRva && id.dispatchMethodRva == scrollerCommonDrawRva &&
-          id.rect == dispatchRect && id.component.state == ScrollerLocationState::NotRead,
+          id.rect == dispatchRect && id.component.state == ScrollerLocationState::NotRead &&
+          id.png == ScrollerPngObservation{},
           "collect dispatch image identities and exact non-stack input rectangle");
     for (const auto& table : scrollerTables) {
         dispatch.Rax = fixture->scroller[0] = fakeWbase + table.tableRva;
@@ -185,7 +195,8 @@ void testCapture()
     check(captureIdentity(component, fakeWbase, ScrollerSite::Component, id) == Observation::Accepted &&
           id.window.state == ScrollerLocationState::Image && id.caller.state == ScrollerLocationState::Image &&
           id.component.state == ScrollerLocationState::Image && id.componentMethod.state == ScrollerLocationState::Image &&
-          id.rect == componentRect && id.componentOffset == 0x50 && id.drawFlag == 0x34,
+          id.rect == componentRect && id.componentOffset == 0x50 && id.drawFlag == 0x34 &&
+          id.png == ScrollerPngObservation{},
           "component rectangle, vtable, executable slot, caller and opaque flag captured");
     ++component.R9;
     check(captureIdentity(component, fakeWbase, ScrollerSite::Component, id) == Observation::Mismatch,
@@ -228,6 +239,108 @@ void testCapture()
     component.Rsp = ~ULONG_PTR{7};
     check(captureIdentity(component, fakeWbase, ScrollerSite::Component, id) == Observation::ReadFailure,
           "overflowing caller slot rejected");
+}
+
+void testPngCapture()
+{
+    using Status = ScrollerPngStatus;
+    ScrollerFixture fixture;
+    std::array<ULONG_PTR, 0x200 / 8> stack{};
+    auto context = contextFor(ScrollerSite::Component, fixture, stack);
+    struct Component {
+        ULONG_PTR table{};
+        DWORD orientation{}, hotId{}, pressedId{};
+        BYTE padding[0x38 - 0x14]{};
+        ULONG_PTR cache{};
+    } component;
+    struct Cache {
+        ULONG_PTR table{}, refCount{};
+        std::array<ULONG_PTR, 32> slots{};
+        BYTE initialized{};
+    } cache;
+    static_assert(offsetof(Component, cache) == 0x38);
+    static_assert(offsetof(Cache, initialized) == 0x110);
+    fixture.geometry[0x28 / 8] = context.Rcx = reinterpret_cast<ULONG_PTR>(&component);
+    component.table = fakeWbase + 0x3D348;
+    component.cache = reinterpret_cast<ULONG_PTR>(&cache);
+    auto& draw = scrollerImage[(0x3D348 + 0x10) / 8];
+    auto& componentGetter = scrollerImage[(0x3D348 + 0x30) / 8];
+    draw = fakeWbase + 0x19290;
+    componentGetter = fakeWbase + 0x1B930;
+    ScrollerIdentity id{};
+    const auto observe = [&](const ScrollerPngObservation& expected, const char* message) {
+        check(captureIdentity(context, fakeWbase, ScrollerSite::Component, id) == Observation::Accepted &&
+              id.png == expected, message);
+    };
+
+    // Cover all cache variants and both orientations, including the highest slot index.
+    constexpr DWORD tables[]{0x3C458, 0x3C440, 0x3C428};
+    constexpr DWORD globals[]{0x550A8, 0x550A0, 0x55098};
+    for (DWORD variant = 0; variant < 3; ++variant) {
+        cache.table = fakeWbase + tables[variant];
+        scrollerImage[(tables[variant] + 0x08) / 8] = fakeWbase + 0x191D0;
+        scrollerImage[globals[variant] / 8] = component.cache;
+        observe({Status::Complete, 0, 0, 0, variant, 0, 0}, "empty PNG cache observed before initialization");
+        component.orientation = 1;
+        component.hotId = 5;
+        component.pressedId = 4;
+        cache.initialized = 1;
+        cache.slots[0] = cache.slots[17] = cache.slots[31] = 1;
+        observe({Status::Complete, 1, 5, 4, variant, 1, 0x80020001UL}, "PNG state and exact presence mask");
+        component.orientation = component.hotId = component.pressedId = 0;
+        cache.initialized = 0;
+        cache.slots.fill(0);
+    }
+
+    component.orientation = 2;
+    observe({Status::InvalidState}, "orientation outside 0..1 rejected");
+    component.orientation = 0;
+    component.hotId = 6;
+    observe({Status::InvalidState}, "hot ID outside 0..5 rejected");
+    component.hotId = 0;
+    component.pressedId = MAXDWORD;
+    observe({Status::InvalidState}, "pressed ID outside 0..5 rejected");
+    component.pressedId = 0;
+    ++componentGetter;
+    observe({Status::InvalidComponent}, "known PNG table with wrong component getter flagged");
+    --componentGetter;
+    ++draw;
+    observe({Status::InvalidComponent}, "known PNG table with wrong draw method flagged");
+    --draw;
+    deniedSlot = &componentGetter;
+    observe({Status::ReadFailed}, "unreadable component getter flagged");
+    deniedSlot = nullptr;
+
+    auto& global = scrollerImage[0x55098 / 8];
+    global = 0;
+    observe({Status::GlobalMismatch}, "absent variant global must not validate the PNG cache");
+    global = component.cache;
+    deniedSlot = &global;
+    observe({Status::ReadFailed}, "unreadable variant global flagged");
+    deniedSlot = nullptr;
+    cache.table = fakeWbase + 0x3C470;
+    observe({Status::InvalidCache}, "cache table outside the concrete variants rejected");
+    cache.table = fakeWbase + 0x3C428;
+    auto& cacheGetter = scrollerImage[(0x3C428 + 0x08) / 8];
+    ++cacheGetter;
+    observe({Status::InvalidCache}, "cache getter in slot +08 must match the pinned target");
+    --cacheGetter;
+    cache.initialized = 2;
+    observe({Status::InvalidCache}, "non-boolean initialized byte rejected");
+    cache.initialized = 1;
+    deniedSlot = cache.slots.data();
+    observe({Status::ReadFailed}, "unreadable PNG slot range flagged");
+    deniedSlot = nullptr;
+    component.cache = 0;
+    observe({Status::InvalidCache}, "null PNG cache rejected");
+    component.cache = ~ULONG_PTR{3};
+    observe({Status::ReadFailed}, "misaligned PNG cache flagged without dereference");
+
+    component.table = reinterpret_cast<ULONG_PTR>(drawTable);
+    deniedSlot = &component.cache;
+    observe({}, "unknown component retains base identity without reading PNG cache");
+    deniedSlot = nullptr;
+    for (const auto rva : globals) scrollerImage[rva / 8] = 0;
 }
 
 void testReplayAndCounts()
@@ -418,21 +531,23 @@ void testActualTraps(ExecutableFixture& fixture)
 int main()
 {
     ScrollerProbeTrace trace;
-    check(ScrollerIdentityProbeAbiV1(nullptr) == scrollerProbeVersion, "scroller export ABI");
-    trace.version = 0;
-    check(RunScrollerIdentityProbeV1(&trace) == ERROR_INVALID_PARAMETER && !attempted,
-          "invalid ABI leaves one-shot unused");
+    check(ScrollerIdentityProbeAbiV2(nullptr) == 2 && scrollerProbeCaptureMs == 60000,
+          "scroller ABI2 and 60 second capture");
+    trace.version = 1;
+    check(RunScrollerIdentityProbeV2(&trace) == ERROR_INVALID_PARAMETER && !attempted,
+          "legacy ABI leaves one-shot unused");
     trace.version = scrollerProbeVersion;
     trace.size = sizeof(DWORD) * 2;
-    check(RunScrollerIdentityProbeV1(&trace) == ERROR_INVALID_PARAMETER && !attempted,
+    check(RunScrollerIdentityProbeV2(&trace) == ERROR_INVALID_PARAMETER && !attempted,
           "reject truncated input before mutation");
     trace.size = sizeof(trace);
     attempted = true;
-    check(RunScrollerIdentityProbeV1(&trace) == ERROR_ALREADY_EXISTS, "attempt cannot re-arm");
+    check(RunScrollerIdentityProbeV2(&trace) == ERROR_ALREADY_EXISTS, "attempt cannot re-arm");
     testCapture();
+    testPngCapture();
     testReplayAndCounts();
     ExecutableFixture fixture;
     testTransaction(fixture);
     testActualTraps(fixture);
-    std::puts("PASS: strict scroller geometry and object identities, dual INT3 replay, rollback and bounded collection");
+    std::puts("PASS: scroller geometry, PNG state/cache, dual INT3 replay, rollback and bounded collection");
 }

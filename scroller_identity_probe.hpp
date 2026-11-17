@@ -2,10 +2,11 @@
 
 #include "platform.hpp"
 
-inline constexpr DWORD scrollerProbeVersion = 1;
+inline constexpr DWORD scrollerProbeVersion = 2;
+inline constexpr DWORD scrollerProbeCaptureMs = 60000;
 inline constexpr size_t scrollerProbeCapacity = 128;
-inline constexpr char scrollerProbeExport[] = "RunScrollerIdentityProbeV1";
-inline constexpr char scrollerProbeAbiExport[] = "ScrollerIdentityProbeAbiV1";
+inline constexpr char scrollerProbeExport[] = "RunScrollerIdentityProbeV2";
+inline constexpr char scrollerProbeAbiExport[] = "ScrollerIdentityProbeAbiV2";
 inline constexpr auto scrollerWbaseHash =
     L"8BC18B9428A1FCFABD77FB1D30D660860434B9F8F1586DFF0387E396F7DA53DE";
 
@@ -55,6 +56,21 @@ struct ScrollerProbeRect {
     bool operator==(const ScrollerProbeRect&) const = default;
 };
 
+inline constexpr DWORD scrollerPngTableRva = 0x3D348;
+inline constexpr DWORD scrollerPngDrawRva = 0x19290;
+inline constexpr DWORD scrollerPngCacheVariantCount = 3;
+
+enum class ScrollerPngStatus : DWORD {
+    NotApplicable, Complete, ReadFailed, InvalidComponent, InvalidState, InvalidCache, GlobalMismatch
+};
+
+struct ScrollerPngObservation {
+    ScrollerPngStatus status{};
+    DWORD orientation{}, hotId{}, pressedId{};
+    DWORD cacheVariant{}, cacheInitializationStarted{}, cachePresenceMask{};
+    bool operator==(const ScrollerPngObservation&) const = default;
+};
+
 // A numeric aggregation key, not an object lifetime ID or a UI surface label.
 struct ScrollerIdentity {
     ScrollerLocation scroller, window, caller, component, componentMethod;
@@ -63,8 +79,20 @@ struct ScrollerIdentity {
     DWORD dispatchMethodRva{};
     DWORD componentOffset{};
     DWORD drawFlag{};
+    ScrollerPngObservation png;
     bool operator==(const ScrollerIdentity&) const = default;
 };
+
+inline bool scrollerPngTable(const ScrollerIdentity& identity, ULONG_PTR wbase)
+{
+    return identity.site == ScrollerSite::Component &&
+        identity.component == ScrollerLocation{wbase, scrollerPngTableRva, ScrollerLocationState::Image};
+}
+
+inline bool scrollerPngDraw(const ScrollerIdentity& identity, ULONG_PTR wbase)
+{
+    return identity.componentMethod == ScrollerLocation{wbase, scrollerPngDrawRva, ScrollerLocationState::Image};
+}
 
 struct ScrollerProbeSample { ScrollerIdentity identity; ULONGLONG calls{}; };
 struct ScrollerProbeCounts {
@@ -85,8 +113,9 @@ struct ScrollerProbeTrace {
 
 static_assert(sizeof(ScrollerLocation) == 16);
 static_assert(sizeof(ScrollerProbeRect) == 16);
-static_assert(sizeof(ScrollerProbeSample) == 120);
-static_assert(sizeof(ScrollerProbeTrace) == 15504);
+static_assert(sizeof(ScrollerPngObservation) == 28);
+static_assert(sizeof(ScrollerProbeSample) == 152);
+static_assert(sizeof(ScrollerProbeTrace) == 19600);
 
 inline bool unresolvedScrollerIdentity(const ScrollerIdentity& identity)
 {

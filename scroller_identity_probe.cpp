@@ -8,9 +8,14 @@
 
 namespace {
 
-constexpr ULONGLONG captureMs = 15000;
 constexpr ULONGLONG drainMs = 100;
 constexpr char breakpoint = static_cast<char>(0xCC);
+constexpr DWORD scrollerPngGetterRva = 0x1B930;
+constexpr DWORD scrollerPngCacheGetterRva = 0x191D0;
+struct PngCacheDefinition { DWORD tableRva, globalRva; };
+constexpr std::array<PngCacheDefinition, scrollerPngCacheVariantCount> pngCaches{{
+    {0x3C458, 0x550A8}, {0x3C440, 0x550A0}, {0x3C428, 0x55098}
+}};
 
 SRWLOCK runLock = SRWLOCK_INIT;
 SRWLOCK sampleLock = SRWLOCK_INIT;
@@ -121,6 +126,61 @@ bool readImageSlot(const ScrollerLocation& table, ULONG_PTR offset, ULONG_PTR& t
         guardedCopy(&target, reinterpret_cast<LPCVOID>(slot), sizeof(target));
 }
 
+bool readCacheGlobal(ULONG_PTR wbase, DWORD rva, ULONG_PTR& cache)
+{
+    ULONG_PTR address{};
+    MEMORY_BASIC_INFORMATION region{};
+    return addOffset(wbase, rva, address) && address % alignof(ULONG_PTR) == 0 &&
+        VirtualQuery(reinterpret_cast<LPCVOID>(address), &region, sizeof(region)) &&
+        region.State == MEM_COMMIT && region.Type == MEM_IMAGE &&
+        reinterpret_cast<ULONG_PTR>(region.AllocationBase) == wbase &&
+        readableMemory(region.Protect) && containsBytes(region, address, sizeof(cache)) &&
+        guardedCopy(&cache, reinterpret_cast<LPCVOID>(address), sizeof(cache));
+}
+
+ScrollerPngObservation observePng(const ScrollerIdentity& identity, ULONG_PTR component, ULONG_PTR wbase)
+{
+    using Status = ScrollerPngStatus;
+    if (!scrollerPngTable(identity, wbase)) return {};
+    if (!scrollerPngDraw(identity, wbase)) return {Status::InvalidComponent};
+    ULONG_PTR componentGetter{};
+    if (!readImageSlot(identity.component, 0x30, componentGetter)) return {Status::ReadFailed};
+    if (componentGetter != wbase + scrollerPngGetterRva) return {Status::InvalidComponent};
+
+    std::array<DWORD, 3> fields{};
+    if (!readMemory(component, 0x08, fields)) return {Status::ReadFailed};
+    const auto [orientation, hotId, pressedId] = fields;
+    if (orientation > 1 || hotId > 5 || pressedId > 5) return {Status::InvalidState};
+
+    ULONG_PTR cache{};
+    if (!readMemory(component, 0x38, cache)) return {Status::ReadFailed};
+    const auto table = readTable(cache);
+    if (table.state == ScrollerLocationState::ReadFailed) return {Status::ReadFailed};
+    if (table.state != ScrollerLocationState::Image || table.imageBase != wbase)
+        return {Status::InvalidCache};
+    const auto definition = std::find_if(pngCaches.begin(), pngCaches.end(),
+        [&](const PngCacheDefinition& entry) { return entry.tableRva == table.rva; });
+    if (definition == pngCaches.end()) return {Status::InvalidCache};
+
+    ULONG_PTR cacheGetter{}, global{};
+    if (!readImageSlot(table, 0x08, cacheGetter) ||
+        !readCacheGlobal(wbase, definition->globalRva, global)) return {Status::ReadFailed};
+    if (cacheGetter != wbase + scrollerPngCacheGetterRva) return {Status::InvalidCache};
+    if (global != cache) return {Status::GlobalMismatch};
+
+    BYTE initializationStarted{};
+    std::array<ULONG_PTR, 32> slots{};
+    // The platform sets this flag before populating slots. Read it after the presence snapshot.
+    if (!readMemory(cache, 0x10, slots) ||
+        !readMemory(cache, 0x110, initializationStarted)) return {Status::ReadFailed};
+    if (initializationStarted > 1) return {Status::InvalidCache};
+    DWORD presenceMask{};
+    for (size_t i = 0; i < slots.size(); ++i)
+        if (slots[i]) presenceMask |= DWORD{1} << i;
+    return {Status::Complete, orientation, hotId, pressedId,
+            static_cast<DWORD>(definition - pngCaches.begin()), initializationStarted, presenceMask};
+}
+
 struct StackRange {
     ULONG_PTR low{}, high{};
 
@@ -177,7 +237,7 @@ Observation captureIdentity(const CONTEXT& ctx, ULONG_PTR wbase, ScrollerSite si
     const auto scroller = dispatch ? ctx.Rsi : ctx.R14;
     const auto rect = dispatch ? ctx.Rbp : ctx.Rsi;
 
-    ULONG_PTR window{}, table{};
+    ULONG_PTR window{}, table{}, component{};
     const auto ownerStatus = inspectScroller(scroller, wbase, window, table, identity);
     if (ownerStatus != Observation::Accepted) return ownerStatus;
     if (ctx.R8 != rect) return Observation::Mismatch;
@@ -190,7 +250,6 @@ Observation captureIdentity(const CONTEXT& ctx, ULONG_PTR wbase, ScrollerSite si
             !addOffset(ctx.R15, ctx.Rdi, expectedRect) || rect != expectedRect ||
             !addOffset(ctx.R15, 0x20 + (ctx.Rdi - 0x40) / 2, slot) || ctx.Rbx != slot ||
             !ctx.Rcx) return Observation::Mismatch;
-        ULONG_PTR component{};
         if (!readMemory(slot, 0, component)) return Observation::ReadFailure;
         if (ctx.Rcx != component) return Observation::Mismatch;
         identity.componentOffset = static_cast<DWORD>(ctx.Rdi);
@@ -217,6 +276,7 @@ Observation captureIdentity(const CONTEXT& ctx, ULONG_PTR wbase, ScrollerSite si
     if (identity.window.state == ScrollerLocationState::ReadFailed) return Observation::ReadFailure;
     // In particular, shared component paint can be called through draw wrappers.
     identity.caller = imageLocation(caller, true);
+    if (!dispatch) identity.png = observePng(identity, component, wbase);
     return Observation::Accepted;
 }
 
@@ -483,7 +543,7 @@ DWORD runProbe(ScrollerProbeTrace& trace)
     // pages have recovered their original protection.
     if (!trace.patchError) {
         const auto start = GetTickCount64();
-        const auto end = start + captureMs;
+        const auto end = start + scrollerProbeCaptureMs;
         deadline.store(end);
         ULONGLONG now{};
         while ((now = GetTickCount64()) < end) Sleep(static_cast<DWORD>(end - now));
@@ -524,12 +584,12 @@ DWORD publish(void* output, const ScrollerProbeTrace& trace, DWORD result)
 
 } // namespace
 
-extern "C" __declspec(dllexport) DWORD WINAPI ScrollerIdentityProbeAbiV1(void*)
+extern "C" __declspec(dllexport) DWORD WINAPI ScrollerIdentityProbeAbiV2(void*)
 {
     return scrollerProbeVersion;
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI RunScrollerIdentityProbeV1(void* output)
+extern "C" __declspec(dllexport) DWORD WINAPI RunScrollerIdentityProbeV2(void* output)
 {
     if (!validInput(output)) return ERROR_INVALID_PARAMETER;
     ScrollerProbeTrace trace;

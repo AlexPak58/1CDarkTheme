@@ -7,6 +7,12 @@
 
 namespace {
 constexpr wchar_t scrollerProbeDllName[] = L"scroller-identity-probe.dll";
+constexpr DWORD scrollerProbeWaitMs = scrollerProbeCaptureMs + 15000;
+constexpr std::array<const char*, 7> pngStatusNames{
+    "not_applicable", "complete", "read_failed", "invalid_component", "invalid_state", "invalid_cache",
+    "global_mismatch"
+};
+static_assert(pngStatusNames.size() == static_cast<size_t>(ScrollerPngStatus::GlobalMismatch) + 1);
 
 struct ProbeModule {
     ULONG_PTR base{};
@@ -150,6 +156,19 @@ bool validLocation(const ScrollerLocation& location, bool code = false)
         !location.imageBase && !location.rva;
 }
 
+bool validPngObservation(const ScrollerIdentity& identity, ULONG_PTR wbase)
+{
+    using Status = ScrollerPngStatus;
+    const auto& png = identity.png;
+    if (!scrollerPngTable(identity, wbase)) return png == ScrollerPngObservation{};
+    if (png.status <= Status::NotApplicable || png.status > Status::GlobalMismatch ||
+        (!scrollerPngDraw(identity, wbase) && png.status != Status::InvalidComponent)) return false;
+    if (png.status == Status::Complete)
+        return png.orientation <= 1 && png.hotId <= 5 && png.pressedId <= 5 &&
+            png.cacheVariant < scrollerPngCacheVariantCount && png.cacheInitializationStarted <= 1;
+    return png == ScrollerPngObservation{png.status};
+}
+
 bool validTrace(const ScrollerProbeTrace& trace, ULONG_PTR wbase)
 {
     if (trace.size != sizeof(trace) || trace.version != scrollerProbeVersion ||
@@ -170,7 +189,8 @@ bool validTrace(const ScrollerProbeTrace& trace, ULONG_PTR wbase)
             id.dispatchMethodRva != scrollerDrawRva(id.scroller.rva) ||
             id.window.state == ScrollerLocationState::NotRead || !validLocation(id.window) ||
             id.caller.state == ScrollerLocationState::NotRead || !validLocation(id.caller, true) ||
-            !validLocation(id.component) || !validLocation(id.componentMethod, true)) return false;
+            !validLocation(id.component) || !validLocation(id.componentMethod, true) ||
+            !validPngObservation(id, wbase)) return false;
         if (id.site == ScrollerSite::Dispatch) {
             if (id.component.state != ScrollerLocationState::NotRead ||
                 id.componentMethod.state != ScrollerLocationState::NotRead ||
@@ -203,8 +223,17 @@ struct ProbeCallResult {
 
 using ProbeCall = DWORD (*)(HANDLE, ULONG_PTR, LPVOID, DWORD&);
 
+DWORD remoteScrollerCall(HANDLE process, ULONG_PTR address, LPVOID payload, DWORD& result)
+{
+    const Handle worker(CreateRemoteThread(process, nullptr, 0,
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(address), payload, 0, nullptr));
+    if (!static_cast<HANDLE>(worker)) return GetLastError();
+    if (WaitForSingleObject(worker, scrollerProbeWaitMs) != WAIT_OBJECT_0) return WAIT_TIMEOUT;
+    return GetExitCodeThread(worker, &result) ? ERROR_SUCCESS : WAIT_TIMEOUT;
+}
+
 ProbeCallResult callScrollerProbe(HANDLE process, ULONG_PTR run, ScrollerProbeTrace& trace,
-                                 ProbeCall call = remoteCall)
+                                 ProbeCall call = remoteScrollerCall)
 {
     ProbeCallResult outcome;
     const auto payload = VirtualAllocEx(process, nullptr, sizeof(trace), MEM_RESERVE | MEM_COMMIT,
@@ -352,10 +381,10 @@ int scrollerProbeToDesigner(DWORD pid, ULONGLONG creation)
     std::vector<ProbeModule> afterModules;
     if (const auto error = probeModules(pid, afterModules))
         return attachResult(AttachStatus::Error, error);
-    std::printf("{\"status\":\"%s\",\"cleanupVerified\":true,\"payloadReleased\":true,\"pid\":%lu,"
+    std::printf("{\"status\":\"%s\",\"probeVersion\":%lu,\"cleanupVerified\":true,\"payloadReleased\":true,\"pid\":%lu,"
                 "\"creation\":\"%llu\",\"elapsedMs\":%lu,\"printingClassification\":\"not-established\","
                 "\"componentHookScope\":\"wbase83+0x1e860-only\",\"sites\":[",
-                trace.sampleCount ? "captured" : "no_samples", pid, creation, trace.elapsedMs);
+                trace.sampleCount ? "captured" : "no_samples", trace.version, pid, creation, trace.elapsedMs);
     bool captureComplete = true;
     for (size_t i = 0; i < trace.counts.size(); ++i) {
         const auto& counts = trace.counts[i];
@@ -389,7 +418,17 @@ int scrollerProbeToDesigner(DWORD pid, ULONGLONG creation)
             const auto componentOkay = printLocation(process, beforeModules, afterModules, id.component);
             std::fputs(",\"componentMethod\":", stdout);
             const auto methodOkay = printLocation(process, beforeModules, afterModules, id.componentMethod, true);
-            captureComplete = captureComplete && componentOkay && methodOkay;
+            const auto& png = id.png;
+            std::printf(",\"png\":{\"status\":\"%s\"", pngStatusNames[static_cast<size_t>(png.status)]);
+            if (png.status == ScrollerPngStatus::Complete) {
+                std::printf(",\"orientation\":%lu,\"hotId\":%lu,\"pressedId\":%lu,\"cacheVariant\":%lu,"
+                            "\"cacheInitializationStarted\":%lu,\"cachePresenceMask\":%lu",
+                            png.orientation, png.hotId, png.pressedId, png.cacheVariant,
+                            png.cacheInitializationStarted, png.cachePresenceMask);
+            }
+            std::putchar('}');
+            captureComplete = captureComplete && componentOkay && methodOkay &&
+                (png.status == ScrollerPngStatus::Complete || png.status == ScrollerPngStatus::NotApplicable);
         }
         std::putchar('}');
     }

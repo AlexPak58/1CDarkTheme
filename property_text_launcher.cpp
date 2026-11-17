@@ -67,11 +67,53 @@ bool productionThemePresent(HANDLE process, const std::vector<ProbeModule>& modu
     return image.validate() && image.remoteSetter(process, mapped);
 }
 
+bool validDiagnostics(const PropertyTextProbeTrace& trace)
+{
+    using namespace propertyTextControl;
+    const auto& diagnostic = trace.diagnostics;
+    if (diagnostic.overflow || diagnostic.reasons[0]) return false;
+    for (const auto size : diagnostic.moduleSizes) if (size > 0x10000000) return false;
+    auto remaining = trace.counts.rejectedStages[static_cast<size_t>(propertyDescription::Stage::WindowTables)];
+    auto mismatches = trace.counts.mismatches, failures = trace.counts.readFailures;
+    for (size_t i = 1; i < diagnostic.reasons.size(); ++i) {
+        const auto count = diagnostic.reasons[i];
+        auto& outcome = i <= static_cast<size_t>(Reason::Back) ? mismatches : failures;
+        if (count > remaining || count > outcome) return false;
+        remaining -= count;
+        outcome -= count;
+    }
+    if (remaining) return false;
+    auto reasonRemaining = diagnostic.reasons;
+    remaining = trace.counts.rejectedStages[static_cast<size_t>(propertyDescription::Stage::WindowTables)];
+    for (size_t bucket = 0; bucket < 2; ++bucket) {
+        if (diagnostic.used[bucket] > propertyTextDiagnosticReserve || diagnostic.drops[bucket] > remaining)
+            return false;
+        remaining -= diagnostic.drops[bucket];
+        const auto start = bucket * propertyTextDiagnosticReserve;
+        for (size_t i = 0; i < diagnostic.used[bucket]; ++i) {
+            const auto& group = diagnostic.groups[start + i];
+            const auto reason = static_cast<size_t>(group.key.reason);
+            const auto module = static_cast<size_t>(group.key.windowTable.module);
+            if (!reason || reason >= reasonRemaining.size() || module >= static_cast<size_t>(Module::Count) ||
+                !group.calls || group.calls > remaining || group.calls > reasonRemaining[reason]) return false;
+            if (module == 0 ? group.key.windowTable.rva != 0 :
+                group.key.windowTable.rva >= diagnostic.moduleSizes[module - 1]) return false;
+            const bool target = group.key.windowTable == TableToken{Module::Text, propertyTextControl::windowTypeRva};
+            if (target != (bucket == 1)) return false;
+            for (size_t j = 0; j < i; ++j)
+                if (diagnostic.groups[start + j].key == group.key) return false;
+            remaining -= group.calls;
+            reasonRemaining[reason] -= group.calls;
+        }
+    }
+    return remaining == 0;
+}
+
 bool validTrace(const PropertyTextProbeTrace& trace)
 {
     using namespace propertyDescription;
     if (trace.size != sizeof(trace) || trace.version != propertyTextProbeVersion ||
-        trace.sampleCount > propertyTextProbeCapacity) return false;
+        trace.sampleCount > propertyTextProbeCapacity || !validDiagnostics(trace)) return false;
     const auto& counts = trace.counts;
     if (counts.mismatches > MAXULONGLONG - counts.readFailures) return false;
     auto rejected = counts.mismatches + counts.readFailures;
@@ -264,8 +306,16 @@ int propertyTextProbeToDesigner(DWORD pid, ULONGLONG creation)
         afterProtection != beforeProtection)
         return attachResult(AttachStatus::Ambiguous, ERROR_INVALID_STATE, result);
     if (const auto error = propertyTextProbeReplyError(trace, call, beforeProtection)) return error;
+    const std::array<const wchar_t*, 3> diagnosticNames{L"frame.dll", L"txtedui.dll", L"wbase83.dll"};
+    for (size_t i = 0; i < diagnosticNames.size(); ++i) {
+        const auto found = std::find_if(beforeModules.begin(), beforeModules.end(), [&](const auto& module) {
+            return pathEqual(module.name, diagnosticNames[i]);
+        });
+        if (found == beforeModules.end() || trace.diagnostics.moduleSizes[i] != found->size)
+            return attachResult(AttachStatus::Ambiguous, ERROR_INVALID_DATA);
+    }
     const auto& counts = trace.counts;
-    std::printf("{\"version\":1,\"status\":\"%s\",\"cleanupVerified\":true,\"payloadReleased\":true,"
+    std::printf("{\"version\":2,\"status\":\"%s\",\"cleanupVerified\":true,\"payloadReleased\":true,"
                 "\"pid\":%lu,\"creation\":\"%llu\",\"elapsedMs\":%lu,\"siteRva\":%lu,"
                 "\"accepted\":%llu,\"mismatches\":%llu,\"readFailures\":%llu,"
                 "\"capacityDrops\":%llu,\"busyDrops\":%llu,\"samples\":[",
@@ -284,7 +334,26 @@ int propertyTextProbeToDesigner(DWORD pid, ULONGLONG creation)
         if (i) std::putchar(',');
         std::printf("%llu", counts.rejectedStages[i]);
     }
-    std::puts("]}");
+    std::printf("],\"windowDiagnostic\":{\"moduleSizes\":[%lu,%lu,%lu],\"overflow\":%lu,\"reasons\":[",
+                trace.diagnostics.moduleSizes[0], trace.diagnostics.moduleSizes[1],
+                trace.diagnostics.moduleSizes[2], trace.diagnostics.overflow);
+    for (size_t i = 0; i < trace.diagnostics.reasons.size(); ++i) {
+        if (i) std::putchar(',');
+        std::printf("%llu", trace.diagnostics.reasons[i]);
+    }
+    std::printf("],\"drops\":[%llu,%llu],\"groups\":[", trace.diagnostics.drops[0], trace.diagnostics.drops[1]);
+    bool comma = false;
+    for (size_t bucket = 0; bucket < 2; ++bucket) {
+        for (size_t i = 0; i < trace.diagnostics.used[bucket]; ++i) {
+            const auto& group = trace.diagnostics.groups[bucket * propertyTextDiagnosticReserve + i];
+            if (comma) std::putchar(',');
+            comma = true;
+            std::printf("{\"reason\":%lu,\"module\":%lu,\"rva\":%lu,\"calls\":%llu}",
+                        static_cast<DWORD>(group.key.reason), static_cast<DWORD>(group.key.windowTable.module),
+                        group.key.windowTable.rva, group.calls);
+        }
+    }
+    std::puts("]}}");
     return 0;
 }
 

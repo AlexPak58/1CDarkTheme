@@ -147,7 +147,37 @@ int wmain(int argc, wchar_t** argv)
     require(!validTrace(trace), "accepted/drop overflow"); trace.counts.accepted=5; trace.counts.capacityDrops=0;
     trace.samples[0].arguments.right=0;
     require(!validTrace(trace), "empty rect rejected"); trace.samples[0].arguments.right=100;
-    trace.version=0; require(!validTrace(trace), "old ABI rejected");
+    {
+        using namespace propertyTextControl;
+        PropertyTextProbeTrace diagnosticTrace;
+        diagnosticTrace.diagnostics.moduleSizes = {0x1000000, 0x1000000, 0x100000};
+        diagnosticTrace.counts.mismatches = 1;
+        diagnosticTrace.counts.rejectedStages[static_cast<size_t>(Stage::WindowTables)] = 1;
+        diagnosticTrace.diagnostics.reasons[static_cast<size_t>(Reason::WindowTable)] = 1;
+        diagnosticTrace.diagnostics.used[0] = 1;
+        diagnosticTrace.diagnostics.groups[0] = {{Reason::WindowTable, {Module::Other, 0}}, 1};
+        require(validTrace(diagnosticTrace), "sanitized numeric rejection reconciles");
+        auto& group = diagnosticTrace.diagnostics.groups[0];
+        group.key.windowTable.rva = 1;
+        require(!validTrace(diagnosticTrace), "Other cannot leak any address or RVA"); group.key.windowTable.rva = 0;
+        group.key.windowTable = {Module::Text, 0x1000000};
+        require(!validTrace(diagnosticTrace), "out of image RVA rejected");
+        group.key.windowTable = {Module::Text, propertyTextControl::windowTypeRva};
+        require(!validTrace(diagnosticTrace), "exact target must use reserved bucket"); group.key.windowTable = {};
+        diagnosticTrace.diagnostics.overflow = 1;
+        require(!validTrace(diagnosticTrace), "diagnostic overflow rejected"); diagnosticTrace.diagnostics.overflow = 0;
+        diagnosticTrace.diagnostics.used[0] = 17;
+        require(!validTrace(diagnosticTrace), "histogram capacity rejected"); diagnosticTrace.diagnostics.used[0] = 1;
+        group.calls = MAXULONGLONG;
+        require(!validTrace(diagnosticTrace), "histogram sum overflow rejected"); group.calls = 1;
+        diagnosticTrace.diagnostics.reasons[1] = MAXULONGLONG;
+        require(!validTrace(diagnosticTrace), "reason sum overflow rejected"); diagnosticTrace.diagnostics.reasons[1] = 1;
+        diagnosticTrace.diagnostics.drops[0] = 1;
+        require(!validTrace(diagnosticTrace), "histogram drop sum mismatch rejected"); diagnosticTrace.diagnostics.drops[0] = 0;
+        group.key.reason = Reason::ReadWindow;
+        require(!validTrace(diagnosticTrace), "histogram and first reason disagree");
+    }
+    trace.version=1; require(!validTrace(trace), "stale ABI1 rejected");
 
     std::vector<ProbeModule> modules;
     require(probeModules(GetCurrentProcessId(), modules) == ERROR_SUCCESS, "own test module inventory");
@@ -159,6 +189,10 @@ int wmain(int argc, wchar_t** argv)
     require(probe && lower && production, "fixtures load only into test process");
     AttachImage probeImage(probePath), lowerImage(lowerPath), productionImage(productionPath);
     require(probeImage.validate(propertyTextProbeExport, propertyTextProbeAbiExport), "probe ABI accepted");
+    require(!GetProcAddress(probe, "RunPropertyTextProbeV1") &&
+            !GetProcAddress(probe, "PropertyTextProbeAbiV1") &&
+            !probeImage.validate("RunPropertyTextProbeV1", "PropertyTextProbeAbiV1"), "stale helper export ABI1 rejected");
+    require(probeImage.validate(propertyTextProbeExport, propertyTextProbeAbiExport), "restore ABI2 validator");
     require(!probeImage.validate(), "probe cannot pass production ABI");
     require(!productionImage.validate(propertyTextProbeExport, propertyTextProbeAbiExport), "theme cannot pass probe ABI");
     require(!lowerImage.validate(propertyTextProbeExport, propertyTextProbeAbiExport), "lower probe cannot pass upper ABI");

@@ -333,8 +333,13 @@ int wmain(int argc, wchar_t** argv)
     }
     if (!selection) selection = enableTreeOnly;
     const std::wstring exe = std::filesystem::absolute(argv[1]).lexically_normal().wstring();
+#ifdef THEME_TOOLTIP_TRACE
+    if (!findTooltipTracePlatform(exe)) {
+        std::fputs("Unsupported 1cv8.exe (expected 8.3.27.2325 or 8.5.1.1529 x64).\n", stderr);
+#else
     if (!matchesSha256(exe, exeHash)) {
         std::fputs("Unsupported 1cv8.exe (expected 8.3.27.2325 x64).\n", stderr);
+#endif
         return 2;
     }
     const auto directory = std::filesystem::path(modulePath(nullptr)).parent_path();

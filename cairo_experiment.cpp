@@ -37,6 +37,7 @@ constexpr size_t firstHook = 1;
 constexpr size_t hookCount = std::size(hooks);
 SRWLOCK traceLock = SRWLOCK_INIT;
 TooltipTrace trace;
+const TooltipTracePlatform* tracePlatform;
 #else
 constexpr size_t firstHook = 0;
 #ifdef THEME_BACKGROUND_ONLY
@@ -84,15 +85,15 @@ bool isExpandedTooltip(const ULONG_PTR* stack)
     const auto stackTop = reinterpret_cast<ULONG_PTR>(
         reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
     const auto address = reinterpret_cast<ULONG_PTR>(stack);
+    const auto& renderer = tracePlatform->rendererReturn;
+    if (address > stackTop || stackTop - address < renderer.stackOffset + sizeof(*stack)) return false;
     // Walk the verified fixed stack frames back to frame.dll's tooltip renderer.
-    return address <= stackTop && stackTop - address >= 0x948 &&
-           stack[0x40 / 8] == graphicsBase + 0x1366E &&
-           stack[0x2A0 / 8] == graphicsBase + 0x4911 &&
-           stack[0x470 / 8] == graphicsBase + 0x9277 &&
-           stack[0x500 / 8] == graphicsBase + 0x25BB6 &&
-           stack[0x6A0 / 8] == graphicsBase + 0x5977 &&
-           stack[0x810 / 8] == graphicsBase + 0x9D45 &&
-           stack[0x940 / 8] == frameBase + 0x5FC7F5;
+    for (const auto& entry : tracePlatform->graphicsReturns) {
+        const auto actual = stack[entry.stackOffset / sizeof(*stack)];
+        if (actual != graphicsBase + entry.rva &&
+            (!entry.alternateRva || actual != graphicsBase + entry.alternateRva)) return false;
+    }
+    return stack[renderer.stackOffset / sizeof(*stack)] == frameBase + renderer.rva;
 }
 
 void countTooltipColor(double red, double green, double blue, double alpha)
@@ -130,8 +131,13 @@ void setSourceRgb(void* context, double red, double green, double blue)
 
 void setSourceRgba(void* context, double red, double green, double blue, double alpha)
 {
+#ifdef THEME_TOOLTIP_TRACE
+    const auto expectedReturn = tracePlatform->rgbaReturn;
+#else
     // grphcs+0x22D0 calls Cairo with the original ARGB split into four channels.
-    if (reinterpret_cast<ULONG_PTR>(_ReturnAddress()) == graphicsBase + 0x2336 &&
+    constexpr auto expectedReturn = 0x2336;
+#endif
+    if (reinterpret_cast<ULONG_PTR>(_ReturnAddress()) == graphicsBase + expectedReturn &&
         enabled.load(std::memory_order_relaxed)) {
         const auto* stack = static_cast<const ULONG_PTR*>(_AddressOfReturnAddress());
 #ifdef THEME_TOOLTIP_TRACE
@@ -166,9 +172,18 @@ DWORD resolveHooks()
     const auto graphics = GetModuleHandleW(L"grphcs.dll");
     const auto cairo = GetModuleHandleW(L"cairo.dll");
     if (!frame || !graphics || !cairo) return ERROR_MOD_NOT_FOUND;
+#ifdef THEME_TOOLTIP_TRACE
+    if (IsDebuggerPresent()) return ERROR_REVISION_MISMATCH;
+    const auto* platform = findTooltipTracePlatform(modulePath(nullptr));
+    if (!platform || !matchesSha256(modulePath(frame), platform->rendererHash) ||
+        !matchesSha256(modulePath(graphics), platform->graphicsHash)) return ERROR_REVISION_MISMATCH;
+    tracePlatform = platform;
+    hooks[firstHook].offset = platform->rgbaSlot;
+#else
     if (IsDebuggerPresent() || !matchesSha256(modulePath(nullptr), exeHash) ||
         !matchesSha256(modulePath(frame), frameHash) ||
         !matchesSha256(modulePath(graphics), graphicsHash)) return ERROR_REVISION_MISMATCH;
+#endif
 
     for (size_t i = firstHook; i < hookCount; ++i) {
         hooks[i].original = reinterpret_cast<PVOID>(GetProcAddress(cairo, hooks[i].name));

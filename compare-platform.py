@@ -18,6 +18,7 @@ PROPERTY_PAINT_RETURN = 0x4F60ED
 SEARCH_LABEL_RENDER_RETURN = 0x5BD070
 SEARCH_LABEL_CLASS_ID = uuid.UUID("4f2defd2-5243-4166-b7f2-3e7ffc5f6394").bytes_le
 SEARCH_GRID_CLASS_ID = uuid.UUID("2dd8e24f-ea53-4aab-a45e-a973eb59375f").bytes_le
+CONTROL_PROPERTIES_ID = uuid.UUID("d3ac3bd1-b55a-11d4-a8bb-00c0df47968e").bytes_le
 SEARCH_RESULTS_TOOLBAR_CLASS_ID = uuid.UUID("12735fb0-15fd-11d4-9403-008048da11f9").bytes_le
 SEARCH_LABEL_LAYOUTS = {
     (0xC20, 0xC38): (0x218, 0x110),
@@ -519,6 +520,64 @@ def search_grid_alternating_palette(rva, code, ranges, after_resolve, method_end
     return None
 
 
+def search_grid_alternating_dispatch(image, rva, code, ranges, palette, color_offset):
+    if palette is None:
+        return None
+    receiver = re.escape(struct.pack("<I", int(palette["palette_receiver_offset"], 16)))
+    alternate = int(palette["alternating_offset"], 16)
+    if alternate == 0x74:
+        read = rb"\x49\x8b\x87" + receiver + rb"\x8b\x48\x74"
+        color_address = rb"\x4d\x8d\x87" + re.escape(color_offset)
+        query = rb"\x4c\x8d\x44\x24\x70\x48\x8d\x15(.{4})\x49\x8b\xcc\xff\x10"
+    else:
+        read = rb"\x49\x8b\x86" + receiver + rb"\x8b\x90\x80\x00\x00\x00"
+        color_address = rb"\x4d\x8d\x86" + re.escape(color_offset)
+        query = rb"\x48\x8d\x55.\x48\x8d\x4d\x90\xe8(.{4})\x90\x48\x8b\x4d\x90"
+    dispatch = (rb"\x83\xf8\x02\x75(?P<branch>.)\x48\x8d\x8d.{4}\xff\x15.{4}"
+                rb"(?:\x89\x9d.{4}|\xc7\x85.{4}\x00\x00\x00\x00)"
+                rb"(?P<read>" + read + rb").{20,100}?\xeb\x07"
+                rb"(?P<fallback>" + color_address + rb").{7,24}?\xba\x04\x00\x00\x00\xff\x50\x48")
+    ro_rva, ro_size, ro_offset = image.sections[b".rdata"]
+    starts = sorted(ranges)
+    query_pattern = re.compile(query, re.S)
+    candidates = []
+    for match in re.finditer(dispatch, code, re.S):
+        if match.end("branch") + struct.unpack("<b", match["branch"])[0] != match.start("fallback"):
+            continue
+        method_index = bisect_right(starts, rva + match.start()) - 1
+        if method_index < 0 or rva + match.end() > ranges[starts[method_index]]:
+            continue
+        query_start = max(starts[method_index] - rva, match.start("read") - 0xD0)
+        for lookup in query_pattern.finditer(code, query_start, match.start()):
+            address = rva + lookup.end(1) + struct.unpack("<i", lookup[1])[0]
+            helper = None
+            query_call = rva + lookup.end() - 2
+            if alternate == 0x80:
+                query_call = rva + lookup.end(1) - 5
+                helper = address
+                end = ranges.get(helper, 0)
+                if not rva <= helper < end <= rva + len(code):
+                    continue
+                body = code[helper - rva:min(end, helper + 0x40) - rva]
+                load = re.search(rb"\x48\x8d\x15(.{4})\x4c\x8b\xc3\xff\x10", body, re.S)
+                if load is None:
+                    continue
+                address = helper + load.end(1) + struct.unpack("<i", load[1])[0]
+            if not ro_rva <= address <= ro_rva + ro_size - len(CONTROL_PROPERTIES_ID):
+                continue
+            if not image.data.startswith(CONTROL_PROPERTIES_ID, ro_offset + address - ro_rva):
+                continue
+            candidates.append({
+                "palette_read": f"0x{rva + match.start('read'):X}",
+                "query": f"0x{query_call:X}",
+                "query_helper": f"0x{helper:X}" if helper else None,
+                "property": 4,
+                "slot": "0x48",
+                "dispatch": f"0x{rva + match.end() - 3:X}",
+            })
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def search_grid_candidates(image, rva, code):
     ranges = dict(image.function_ranges())
     imports = {slot: symbol for _, symbol, slot in image.imports()}
@@ -569,6 +628,8 @@ def search_grid_candidates(image, rva, code):
                         if (resolve[3] != assignment[2] or imports.get(style_import)
                                 != "?kInvalidV8StyleEntryId@core@@3VCompositeID@1@B"):
                             continue
+                        palette = search_grid_alternating_palette(
+                            rva, code, ranges, rva + resolve.end(), ranges[method])
                         yield {
                             "registration": f"0x{record:X}",
                             "factory": f"0x{factory:X}",
@@ -583,8 +644,9 @@ def search_grid_candidates(image, rva, code):
                             "field_load": f"0x{rva + resolve.start(3) - 3:X}",
                             "window_colors": search_grid_window_colors(
                                 image, rva, code, ranges, imports, vtable),
-                            "alternating_palette": search_grid_alternating_palette(
-                                rva, code, ranges, rva + resolve.end(), ranges[method]),
+                            "alternating_palette": palette,
+                            "alternating_dispatch": search_grid_alternating_dispatch(
+                                image, rva, code, ranges, palette, assignment[2]),
                         }
 
 

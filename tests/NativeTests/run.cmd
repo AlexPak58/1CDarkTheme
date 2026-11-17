@@ -25,7 +25,9 @@ call "%CD%\build.cmd" "%OUT%\color" search-results-color-test
 if errorlevel 1 goto failed
 call "%CD%\build.cmd" "%OUT%\background" int3-bg
 if errorlevel 1 goto failed
-for %%T in (profile-test attach-test caption-test install-test) do (
+call "%CD%\build.cmd" "%OUT%\counter" counter-probe
+if errorlevel 1 goto failed
+for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test) do (
     cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /I. "%~dp0%%T.cpp" /Fo"%OUT%\%%T.obj" /Fe"%OUT%\%%T.exe" /link bcrypt.lib dwmapi.lib user32.lib
     if errorlevel 1 goto failed
 )
@@ -41,6 +43,12 @@ if errorlevel 1 goto failed
 if errorlevel 1 goto failed
 "%OUT%\install-test.exe"
 if errorlevel 1 goto failed
+"%OUT%\counter-probe-test.exe"
+if errorlevel 1 goto failed
+"%OUT%\counter-launcher-test.exe" "%OUT%\counter\search-counter-probe.dll" "%OUT%\normal\tree-theme.dll"
+if errorlevel 1 goto failed
+"%OUT%\counter\counter-probe-run.exe" --attach bogus 1 --palette impossible
+if not "%errorlevel%"=="2" goto failed
 "%OUT%\normal\tree-theme-run.exe" --attach bogus 1 --palette impossible
 if not "%errorlevel%"=="2" goto failed
 popd

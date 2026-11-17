@@ -466,7 +466,8 @@ struct AttachModules {
     std::wstring frontend;
 };
 
-DWORD snapshotAttachModules(DWORD pid, const std::wstring& dll, AttachModules& modules)
+DWORD snapshotAttachModules(DWORD pid, const std::wstring& dll, AttachModules& modules,
+                            const wchar_t* moduleName = L"tree-theme.dll")
 {
     modules = {};
     const Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid));
@@ -475,7 +476,7 @@ DWORD snapshotAttachModules(DWORD pid, const std::wstring& dll, AttachModules& m
     item.dwSize = sizeof(item);
     if (!Module32FirstW(snapshot, &item)) return GetLastError();
     do {
-        if (pathEqual(L"tree-theme.dll", item.szModule)) {
+        if (pathEqual(moduleName, item.szModule)) {
             if (pathEqual(dll, item.szExePath)) {
                 modules.ownBase = reinterpret_cast<ULONG_PTR>(item.modBaseAddr);
                 modules.ownSize = item.modBaseSize;
@@ -507,7 +508,8 @@ public:
     AttachImage(const AttachImage&) = delete;
     AttachImage& operator=(const AttachImage&) = delete;
 
-    bool validate(const char* exportName = "SetThemeProfile")
+    bool validate(const char* exportName = "SetThemeProfile",
+                  const char* abiExport = themeProfileAttachExport)
     {
         if (!image_) return false;
         const auto base = reinterpret_cast<ULONG_PTR>(image_);
@@ -538,7 +540,7 @@ public:
             return code - base;
         };
         setter_ = executableExport(exportName);
-        return setter_ && executableExport(themeProfileAttachExport);
+        return setter_ && executableExport(abiExport);
     }
 
     ULONG_PTR remoteSetter(HANDLE process, const AttachModules& modules) const

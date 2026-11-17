@@ -26,6 +26,12 @@ if /i "%~2"=="grid-probe" (
     set "THEME_DLL_NAME=grid-identity-probe.dll"
     set "THEME_LAUNCHER_NAME=grid-probe-run.exe"
 )
+if /i "%~2"=="frame-probe" (
+    set "THEME_SOURCE=local_frame_probe.cpp"
+    set "THEME_LAUNCHER_SOURCE=frame_probe_launcher.cpp"
+    set "THEME_DLL_NAME=local-frame-probe.dll"
+    set "THEME_LAUNCHER_NAME=frame-probe-run.exe"
+)
 if /i "%~2"=="cairo" (
     set "THEME_SOURCE=cairo_experiment.cpp"
     set "THEME_LAUNCHER_FLAGS=/DTHEME_BENCHMARK"

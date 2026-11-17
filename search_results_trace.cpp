@@ -9,6 +9,8 @@ namespace {
 constexpr ULONG_PTR dispatchRva = 0x82F40D;
 constexpr ULONG_PTR copyRva = 0x2FAD04;
 constexpr ULONG_PTR resultsGridVtableRva = 0xA88AC0;
+constexpr ULONG_PTR standaloneGridVtableRva = 0xA8A278;
+constexpr auto frontendHash = L"1E309B705B04DC8A85DC99212368AEF848BCD70AB1BD9F1DB1F09E6A9452531E";
 constexpr char breakpoint = static_cast<char>(0xCC);
 
 struct ProbeSite {
@@ -23,6 +25,9 @@ struct ProbeSite {
 
 ProbeSite dispatch{dispatchRva, {0xBA, 0x04, 0, 0, 0, 0xFF, 0x50, 0x48}, 5};
 ProbeSite colorCopy{copyRva, {0x8B, 0x48, 0x74, 0x89, 0x4C, 0x24, 0x30, 0x48}, 3};
+ProbeSite standalone{0x2EF073, {0x48, 0x8D, 0x05, 0xFE, 0xB1, 0x79, 0, 0x48}, 7};
+ProbeSite aggregated{0x2EF42D, {0x48, 0x8D, 0x05, 0x8C, 0x96, 0x79, 0, 0x48}, 7};
+ProbeSite background{0x811A00, {0x49, 0x8B, 0xCF, 0xE8, 0xC8, 0x2B, 0x89, 0xFF}, 3};
 constexpr std::array<BYTE, 8> whiteWrite{0x41, 0xC7, 0x47, 0x70, 0xFF, 0xFF, 0xFF, 0};
 std::array<ProbeSite, searchGridWhiteWriteRvas.size()> whiteSites{
     ProbeSite{searchGridWhiteWriteRvas[0], whiteWrite, 8},
@@ -30,10 +35,13 @@ std::array<ProbeSite, searchGridWhiteWriteRvas.size()> whiteSites{
     ProbeSite{searchGridWhiteWriteRvas[2], whiteWrite, 8},
     ProbeSite{searchGridWhiteWriteRvas[3], whiteWrite, 8},
 };
-const std::array sites{&dispatch, &colorCopy, &whiteSites[0], &whiteSites[1], &whiteSites[2], &whiteSites[3]};
+const std::array sites{&dispatch, &colorCopy, &whiteSites[0], &whiteSites[1], &whiteSites[2], &whiteSites[3],
+                       &standalone, &aggregated, &background};
 
 SRWLOCK probeLock = SRWLOCK_INIT;
 ULONG_PTR resultsGridVtable{};
+ULONG_PTR standaloneGridVtable{};
+ULONG_PTR frontendBase{};
 bool handlerInstalled{};
 std::atomic_bool collecting{};
 std::atomic<DWORD> cachedColorCalls{};
@@ -43,6 +51,65 @@ std::atomic<DWORD> otherGridCalls{};
 std::atomic<DWORD> cachedColorCopies{};
 std::atomic<DWORD> otherGridColorCopies{};
 std::array<std::atomic<DWORD>, searchGridWhiteWriteRvas.size()> whiteWrites{};
+std::atomic<DWORD> traceGeneration{};
+std::atomic<DWORD> resultsStandaloneCreations{};
+std::atomic<DWORD> resultsAggregatedCreations{};
+std::atomic<DWORD> otherCreations{};
+std::atomic<DWORD> resultsBackgrounds{};
+std::atomic<DWORD> otherBackgrounds{};
+
+struct GridCandidate {
+    ULONG_PTR address;
+    ULONG_PTR vtable;
+    DWORD generation;
+};
+
+thread_local GridCandidate lastCandidate{};
+
+bool hasResultsLoader(const CONTEXT& fault)
+{
+    ULONG_PTR stackLow{}, stackHigh{};
+    GetCurrentThreadStackLimits(&stackLow, &stackHigh);
+    CONTEXT frame = fault;
+    // Unwind exact return addresses. Scanning raw stack words can pick up an old frame.
+    __try {
+        for (int depth = 0; depth < 48 && frame.Rip; ++depth) {
+            if (frame.Rip == frontendBase + 0x28B871 || frame.Rip == frontendBase + 0x28B87B ||
+                frame.Rip == frontendBase + 0x28B892) return true;
+            const auto stack = frame.Rsp;
+            if (stack < stackLow || stack > stackHigh - sizeof(ULONG_PTR)) break;
+            DWORD64 image{};
+            const auto entry = RtlLookupFunctionEntry(frame.Rip, &image, nullptr);
+            if (entry) {
+                void* data{};
+                DWORD64 establisher{};
+                RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, frame.Rip, entry, &frame, &data,
+                                 &establisher, nullptr);
+            } else {
+                frame.Rip = *reinterpret_cast<const ULONG_PTR*>(stack);
+                frame.Rsp += sizeof(ULONG_PTR);
+            }
+            if (frame.Rsp <= stack) break;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return false;
+}
+
+void observeCreation(const CONTEXT& context, bool aggregate)
+{
+    const auto control = context.Rbx + (aggregate ? 0x18 : 0);
+    if (lastCandidate.address == control) lastCandidate = {};
+    if (!hasResultsLoader(context)) {
+        otherCreations.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    auto& count = aggregate ? resultsAggregatedCreations : resultsStandaloneCreations;
+    count.fetch_add(1, std::memory_order_relaxed);
+    lastCandidate = {control, aggregate ? resultsGridVtable : standaloneGridVtable,
+                     traceGeneration.load(std::memory_order_relaxed)};
+}
 
 void countDispatch(const CONTEXT& context)
 {
@@ -64,7 +131,26 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
 
     auto& context = *exception->ContextRecord;
     const auto address = record->ExceptionAddress;
-    const bool count = collecting.load(std::memory_order_relaxed);
+    const bool count = collecting.load(std::memory_order_acquire);
+    if (address == standalone.address || address == aggregated.address) {
+        const bool aggregate = address == aggregated.address;
+        if (count) observeCreation(context, aggregate);
+        context.Rax = aggregate ? resultsGridVtable : standaloneGridVtable;
+        context.Rip = reinterpret_cast<ULONG_PTR>(address) + standalone.instructionLength;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (address == background.address) {
+        if (count) {
+            const bool match = context.Rdi == lastCandidate.address &&
+                lastCandidate.generation == traceGeneration.load(std::memory_order_relaxed) &&
+                *reinterpret_cast<const ULONG_PTR*>(context.Rdi) == lastCandidate.vtable;
+            auto& counter = match ? resultsBackgrounds : otherBackgrounds;
+            counter.fetch_add(1, std::memory_order_relaxed);
+        }
+        context.Rcx = context.R15; // mov rcx, r15
+        context.Rip = reinterpret_cast<ULONG_PTR>(address) + background.instructionLength;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if (address == dispatch.address) {
         if (count) countDispatch(context);
         context.Rdx = 4; // mov edx, 4
@@ -95,10 +181,13 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
 DWORD prepare()
 {
     HMODULE frame = GetModuleHandleW(L"frame.dll");
-    if (!frame) return ERROR_MOD_NOT_FOUND;
+    HMODULE frontend = GetModuleHandleW(L"frntend.dll");
+    if (!frame || !frontend) return ERROR_MOD_NOT_FOUND;
     if (!matchesSha256(modulePath(nullptr), exeHash) ||
-        !matchesSha256(modulePath(frame), frameHash)) return ERROR_REVISION_MISMATCH;
+        !matchesSha256(modulePath(frame), frameHash) ||
+        !matchesSha256(modulePath(frontend), frontendHash)) return ERROR_REVISION_MISMATCH;
     const auto frameBase = reinterpret_cast<ULONG_PTR>(frame);
+    frontendBase = reinterpret_cast<ULONG_PTR>(frontend);
     for (auto* site : sites) {
         site->address = reinterpret_cast<BYTE*>(frameBase + site->rva);
         if (std::memcmp(site->address, site->signature.data(), site->signature.size()))
@@ -108,11 +197,13 @@ DWORD prepare()
     HMODULE pinned{};
     constexpr auto pin = GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
     if (!GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(frame), &pinned) ||
+        !GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(frontend), &pinned) ||
         !GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(&onBreakpoint), &pinned))
         return GetLastError();
 
     // The handler remains available for any breakpoint already in flight on disable.
     resultsGridVtable = frameBase + resultsGridVtableRva;
+    standaloneGridVtable = frameBase + standaloneGridVtableRva;
     if (!AddVectoredExceptionHandler(1, onBreakpoint)) return ERROR_DLL_INIT_FAILED;
     handlerInstalled = true;
     return ERROR_SUCCESS;
@@ -184,7 +275,8 @@ DWORD setEnabled(bool enable)
             return rollbackError ? rollbackError : error;
         }
     }
-    collecting.store(true, std::memory_order_relaxed);
+    traceGeneration.fetch_add(1, std::memory_order_relaxed);
+    collecting.store(true, std::memory_order_release);
     return ERROR_SUCCESS;
 }
 
@@ -200,7 +292,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(void* setting)
     return error;
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV2(void* output)
+extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV3(void* output)
 {
     if (!output) return ERROR_INVALID_PARAMETER;
     SearchResultsTrace trace{
@@ -211,6 +303,11 @@ extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV2(void* out
         cachedColorCopies.exchange(0, std::memory_order_relaxed),
         otherGridColorCopies.exchange(0, std::memory_order_relaxed),
         {},
+        resultsStandaloneCreations.exchange(0, std::memory_order_relaxed),
+        resultsAggregatedCreations.exchange(0, std::memory_order_relaxed),
+        otherCreations.exchange(0, std::memory_order_relaxed),
+        resultsBackgrounds.exchange(0, std::memory_order_relaxed),
+        otherBackgrounds.exchange(0, std::memory_order_relaxed),
     };
     for (size_t i = 0; i < whiteWrites.size(); ++i)
         trace.whiteWrites[i] = whiteWrites[i].exchange(0, std::memory_order_relaxed);

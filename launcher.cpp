@@ -255,6 +255,7 @@ bool parseProfile(std::wstring_view input, ThemeProfile& profile)
     if ((input.size() + 1) % 7 != 0) return false;
     const size_t colorCount = (input.size() + 1) / 7;
     if (colorCount != paletteColorCount &&
+        !(colorCount == searchResultsBackground && zones < enableSearchResults) &&
         !(colorCount == toolbarBorder && zones < enableToolbarBorder) &&
         !(colorCount == toolbarBandBackground && zones < enableToolbarBand) &&
         !(colorCount == popupMenuBackground && zones < enablePopupMenu))
@@ -430,7 +431,8 @@ int wmain(int argc, wchar_t** argv)
     const bool profileMode = argc == 5 && std::wstring_view(argv[3]) == L"--palette";
     ThemeProfile profile;
     if (profileMode && !parseProfile(argv[4], profile)) {
-        std::fputs("Invalid palette. Expected a zone mask and 31 six-digit RGB colors (25, 29 or 30 for legacy palettes).\n", stderr);
+        std::fputs("Invalid palette. Expected a zone mask and 33 six-digit RGB colors "
+                   "(25, 29, 30 or 31 for legacy palettes).\n", stderr);
         return 2;
     }
     ULONG_PTR selection{};
@@ -443,6 +445,7 @@ int wmain(int argc, wchar_t** argv)
         else if (option == L"--status-bar") selection |= enableStatusBar;
         else if (option == L"--window-tabs") selection |= enableWindowTabs;
         else if (option == L"--tree-tabs") selection |= enableTreeTabs;
+        else if (option == L"--search-results") selection |= enableSearchResults;
         else {
             std::fwprintf(stderr, L"Unknown option: %ls\n", argv[i]);
             return 2;
@@ -451,7 +454,7 @@ int wmain(int argc, wchar_t** argv)
     if (argc < 3 || !serverRef(argv[2])) {
         std::fputs("Usage: tree-theme-run.exe <1cv8.exe> <server\\ref>"
                    " [--caption] [--bars] [--properties] [--workspace] [--status-bar]"
-                   " [--window-tabs] [--tree-tabs]\n"
+                   " [--window-tabs] [--tree-tabs] [--search-results]\n"
                    "       tree-theme-run.exe <1cv8.exe> <server\\ref> --palette <mask>:<RGB,...>\n", stderr);
         return 2;
     }

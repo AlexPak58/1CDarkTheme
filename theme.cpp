@@ -1,4 +1,5 @@
 #include "platform.hpp"
+#include "list_identity.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -30,7 +31,6 @@ constexpr ULONG_PTR windowPanelPaintReturn = 0x8EF5DD;
 constexpr ULONG_PTR propertyPaintReturn = 0x4F60ED;
 constexpr ULONG_PTR propertyLinkVtable = 0xACD3B8;
 constexpr ULONG_PTR sharedListPaintReturn = 0x8117F5;
-constexpr ULONG_PTR dropdownPaintVtable = 0xA8A278;
 // Windows 11 DWMWA_CAPTION_COLOR and DWMWA_TEXT_COLOR, also buildable with older SDKs.
 constexpr DWORD captionColorAttribute = 35;
 constexpr DWORD captionTextColorAttribute = 36;
@@ -61,6 +61,7 @@ constexpr size_t installedSiteCount = std::size(sites);
 
 ULONG_PTR frameBase;
 ULONG_PTR graphicsBase;
+ULONG_PTR frontendBase;
 SRWLOCK installationLock = SRWLOCK_INIT;
 constexpr ThemeProfile defaultProfile{};
 ThemeProfile customProfile;
@@ -146,32 +147,34 @@ ULONG_PTR callerAt(const CONTEXT& registers, ULONG_PTR offset)
     return *reinterpret_cast<const ULONG_PTR*>(location);
 }
 
-bool isDropdownPaint(const CONTEXT& registers, ULONG_PTR paintReturnSlot)
+ListKind listKindAt(const CONTEXT& registers, ULONG_PTR paintReturnSlot)
 {
     if (callerAt(registers, paintReturnSlot) != frameBase + sharedListPaintReturn)
-        return false;
+        return ListKind::Unknown;
 
     // The paint prologue saves the dispatcher's RDI (receiver + 0x100).
     const auto savedRdi = callerAt(registers, paintReturnSlot - 0x20);
-    if (savedRdi <= 0x100) return false;
-    __try {
-        return *reinterpret_cast<const ULONG_PTR*>(savedRdi - 0x100) ==
-               frameBase + dropdownPaintVtable;
-    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
-                EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
-        return false;
-    }
+    return savedRdi > 0x100 ? classifyListControl(savedRdi - 0x100, frameBase, frontendBase) :
+                             ListKind::Unknown;
 }
 
-// The trees and this popup use a shared renderer with distinct receivers.
-DWORD listFill(const CONTEXT& regs, ULONG_PTR slot, DWORD original, ULONG_PTR zones,
-               const ThemeProfile& palette, bool useBgr)
+DWORD listColor(ListKind kind, DWORD original, ULONG_PTR zones,
+                const ThemeProfile& palette, bool text, bool useBgr)
 {
-    if (!(zones & (enableTreeOnly | enableDropdown))) return original;
-    const bool dropdown = isDropdownPaint(regs, slot);
-    if (!(zones & (dropdown ? enableDropdown : enableTreeOnly))) return original;
-    const DWORD fill = palette.colors[dropdown ? dropdownBackground : treeBackground];
-    return replaceRgb(original, useBgr ? toBgr(fill) : fill);
+    ULONG_PTR zone{};
+    PaletteColor color{};
+    switch (kind) {
+    case ListKind::MetadataTree:
+        zone = enableTreeOnly; color = text ? treeText : treeBackground; break;
+    case ListKind::Dropdown:
+        zone = enableDropdown; color = text ? dropdownText : dropdownBackground; break;
+    case ListKind::SearchResults:
+        zone = enableSearchResults; color = text ? searchResultsText : searchResultsBackground; break;
+    default: return original;
+    }
+    if (!(zones & zone)) return original;
+    const DWORD rgb = palette.colors[color];
+    return replaceRgb(original, useBgr ? toBgr(rgb) : rgb);
 }
 
 bool isTreeTabStrip(ULONG_PTR receiver)
@@ -292,7 +295,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     const ULONG_PTR theme = activeTheme.load(std::memory_order_acquire);
     const auto& colors = *activeProfile.load(std::memory_order_relaxed);
     const bool dark = (theme & enableTreeOnly) != 0;
-    const bool withLists = (theme & (enableTreeOnly | enableDropdown)) != 0;
+    const bool withLists = (theme & (enableTreeOnly | enableDropdown | enableSearchResults)) != 0;
     const bool withBars = (theme & enableTreeAndBars) != 0;
     const bool withProperties = (theme & enableTreeAndProperties) != 0;
     const bool withStatusBar = (theme & enableStatusBar) != 0;
@@ -303,15 +306,19 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     if (event.ExceptionAddress == sites[rowFill].address) {
         // This call site fills the area occupied by the tree's rows.
         const auto original = static_cast<DWORD>(regs.Rsi);
-        regs.R8 = (original & rgbMask) == white ?
-            listFill(regs, 0x3D8, original, theme, colors, true) : original;
+        regs.R8 = withLists && (original & rgbMask) == white ?
+            listColor(listKindAt(regs, 0x3D8), original, theme, colors, false, true) : original;
     } else if (event.ExceptionAddress == sites[emptyFill].address) {
         // CMOVNE selects the low 32 bits and clears the high 32 bits.
         regs.Rdx = static_cast<DWORD>((regs.EFlags & 0x40) == 0 ? regs.Rax : regs.Rdx);
         if (withLists && static_cast<DWORD>(regs.Rdx) == white &&
             callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
             callerAt(regs, 0x148) == frameBase + 0xA4638) {
-            regs.Rdx = listFill(regs, 0x268, white, theme, colors, true);
+            // A direct grid fill and a tree fill have different enclosing frames.
+            const auto kind = callerAt(regs, 0x198) == frameBase + 0x811A08 ?
+                classifyListControl(callerAt(regs, 0x190), frameBase, frontendBase) :
+                listKindAt(regs, 0x268);
+            regs.Rdx = listColor(kind, white, theme, colors, false, true);
         } else if ((theme & enableToolbarBand) != 0 && (regs.EFlags & 0x40) == 0 &&
                    regs.Rdx == barBackgroundBgr &&
                    callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
@@ -360,13 +367,12 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         const auto caller = callerAt(regs, 0x38);
         if (withLists && (argb & rgbMask) == white && caller == graphicsBase + 0x7905B &&
             callerAt(regs, 0x4B8) == frameBase + 0x85F475) {
-            argb = listFill(regs, 0xCB8, argb, theme, colors, false);
+            argb = listColor(listKindAt(regs, 0xCB8), argb, theme, colors, false, false);
         } else if (withLists && (argb & rgbMask) == 0 && caller == graphicsBase + 0x79821) {
             if (callerAt(regs, 0x578) == frameBase + 0x85F475) {
-                const bool dropdown = isDropdownPaint(regs, 0xD78);
-                if (theme & (dropdown ? enableDropdown : enableTreeOnly))
-                    argb = replaceRgb(argb, colors.colors[dropdown ? dropdownText : treeText]);
-            } else if (dark && callerAt(regs, 0x688) == frameBase + 0x85F2CD) {
+                argb = listColor(listKindAt(regs, 0xD78), argb, theme, colors, true, false);
+            } else if (dark && callerAt(regs, 0x688) == frameBase + 0x85F2CD &&
+                       listKindAt(regs, 0xE88) == ListKind::MetadataTree) {
                 // Separate fragments of filtered tree labels.
                 argb = replaceRgb(argb, colors.colors[treeText]);
             }
@@ -432,13 +438,16 @@ DWORD installSites()
 {
     const auto frame = GetModuleHandleW(L"frame.dll");
     const auto graphics = GetModuleHandleW(L"grphcs.dll");
-    if (!frame || !graphics) return ERROR_MOD_NOT_FOUND;
+    const auto frontend = GetModuleHandleW(L"frntend.dll");
+    if (!frame || !graphics || !frontend) return ERROR_MOD_NOT_FOUND;
     if (IsDebuggerPresent() || !matchesSha256(modulePath(nullptr), exeHash) ||
         !matchesSha256(modulePath(frame), frameHash) ||
-        !matchesSha256(modulePath(graphics), graphicsHash)) return ERROR_REVISION_MISMATCH;
+        !matchesSha256(modulePath(graphics), graphicsHash) ||
+        !matchesSha256(modulePath(frontend), listFrontendHash)) return ERROR_REVISION_MISMATCH;
 
     frameBase = reinterpret_cast<ULONG_PTR>(frame);
     graphicsBase = reinterpret_cast<ULONG_PTR>(graphics);
+    frontendBase = reinterpret_cast<ULONG_PTR>(frontend);
     sites[rowFill].address = reinterpret_cast<BYTE*>(frameBase + 0x303454);
     sites[emptyFill].address = reinterpret_cast<BYTE*>(graphicsBase + 0xAEE4E);
     sites[labelColor].address = reinterpret_cast<BYTE*>(graphicsBase + 0x22D7);
@@ -457,6 +466,7 @@ DWORD installSites()
         reinterpret_cast<LPCWSTR>(&onBreakpoint),
         reinterpret_cast<LPCWSTR>(frame),
         reinterpret_cast<LPCWSTR>(graphics),
+        reinterpret_cast<LPCWSTR>(frontend),
     };
     constexpr auto flags = GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
     for (const auto& module : modules) {
@@ -525,7 +535,8 @@ DWORD applyProfile(const ThemeProfile& profile, ULONG_PTR zones)
 extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
 {
     const auto requested = reinterpret_cast<ULONG_PTR>(setting);
-    if (requested > 255) return ERROR_INVALID_PARAMETER;
+    if (requested & ~(static_cast<ULONG_PTR>(255) | enableSearchResults))
+        return ERROR_INVALID_PARAMETER;
     AcquireSRWLockExclusive(&installationLock);
     const DWORD result = customApplied ? ERROR_ALREADY_ASSIGNED :
         applyProfile(defaultProfile, requested ? requested | enableTreeOnly : 0);

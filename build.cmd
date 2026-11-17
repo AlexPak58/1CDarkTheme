@@ -50,6 +50,12 @@ if /i "%~2"=="property-probe" (
     set "THEME_DLL_NAME=property-description-probe.dll"
     set "THEME_LAUNCHER_NAME=property-probe-run.exe"
 )
+if /i "%~2"=="property-paint-probe" (
+    set "THEME_SOURCE=property_paint_probe.cpp"
+    set "THEME_LAUNCHER_SOURCE=property_paint_launcher.cpp"
+    set "THEME_DLL_NAME=property-paint-probe.dll"
+    set "THEME_LAUNCHER_NAME=property-paint-probe-run.exe"
+)
 if /i "%~2"=="cairo" (
     set "THEME_SOURCE=cairo_experiment.cpp"
     set "THEME_LAUNCHER_FLAGS=/DTHEME_BENCHMARK"

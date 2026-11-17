@@ -26,6 +26,32 @@ int wmain(int argc, wchar_t** argv)
     check(!parseDecimal(L"18446744073709551616", parsed) && !parseDecimal(L"-1", parsed), "reject overflow and sign");
     check(!parseDecimal(L"4294967296", parsedPid), "reject overflow PID");
 
+    const auto palette = [](DWORD zones, size_t count) {
+        auto input = std::to_wstring(zones) + L":ABCDEF";
+        for (size_t i = 1; i < count; ++i) input += L",ABCDEF";
+        return input;
+    };
+    ThemeProfile profile;
+    check(parseProfile(palette(themeZoneMask, 36), profile) && profile.zones == themeZoneMask &&
+          profile.colors[panelBorder] == 0xABCDEF, "parse v7 panel border independently of zone mask");
+    constexpr DWORD legacyMasks[] = {511, 1023, 2047, 4095, 8191, 16383};
+    constexpr size_t legacyCounts[] = {25, 29, 30, 31, 33, 35};
+    const ThemeProfile defaults;
+    for (size_t i = 0; i < std::size(legacyCounts); ++i) {
+        const auto count = legacyCounts[i];
+        const auto zones = legacyMasks[i];
+        check(parseProfile(palette(zones, count), profile) && profile.zones == zones &&
+              std::all_of(profile.colors.begin(), profile.colors.begin() + count,
+                          [](DWORD color) { return color == 0xABCDEF; }) &&
+              std::equal(profile.colors.begin() + count, profile.colors.end(), defaults.colors.begin() + count),
+              "legacy palette preserves mask and supplied colors and appends defaults");
+        check(!parseProfile(palette(zones + 1, count), profile), "legacy mask outside palette range refused");
+    }
+    check(parseProfile(palette(0, 35), profile) && !profile.zones, "legacy native palette keeps zones disabled");
+    check(!parseProfile(palette(0, 34), profile) && !parseProfile(palette(0, 37), profile),
+          "unexpected color counts refused");
+    check(!parseProfile(palette(8192, 35) + L",GGGGGG", profile), "invalid v7 border refused");
+
     const auto pid = GetCurrentProcessId();
     FILETIME created{}, exited{}, kernel{}, user{};
     check(GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user), "read test process times");
@@ -68,7 +94,8 @@ int wmain(int argc, wchar_t** argv)
     const HMODULE loaded = LoadLibraryW(imagePath.c_str());
     check(loaded != nullptr, "load production fixture only into this test process");
     AttachImage image(imagePath);
-    check(image.validate(), "production image has attach ABI and executable setter");
+    check(image.validate() && GetProcAddress(loaded, "ThemeProfileAttachV7"),
+          "production image has v7 attach ABI and executable setter");
     AttachModules modules;
     check(snapshotAttachModules(pid, imagePath, modules) == ERROR_SUCCESS &&
           modules.ownBase == reinterpret_cast<ULONG_PTR>(loaded) && !modules.competingDll, "matching mapped path");

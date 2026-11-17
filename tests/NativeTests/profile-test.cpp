@@ -73,9 +73,10 @@ int main(int argc, char** argv)
     check(argc == 2, "expected process mode");
     installationResult = ERROR_SUCCESS;  // Bypass production code patching in this standalone test.
     ThemeProfile profile;
-    check(profile.version == 6 && profile.size == 152 && profile.zones == 16127 &&
-          profile.colors[panelHeaderBackground] == 0x1F2938 && profile.colors[panelHeaderText] == 0xE5EBF5,
-          "native defaults include panel headers");
+    check(profile.version == 7 && profile.size == 156 && profile.zones == 16127 &&
+          panelBorder == 35 && paletteColorCount == 36 &&
+          profile.colors[panelHeaderBackground] == 0x1F2938 && profile.colors[panelHeaderText] == 0xE5EBF5 &&
+          profile.colors[panelBorder] == 0x3B4758, "native defaults include panel headers and border");
     profile.zones = enableSearchResults;
     if (std::strcmp(argv[1], "DESIGNER") != 0) {
         check(SetThemeProfile(&profile) == ERROR_NOT_SUPPORTED, "DLL rejects Enterprise mode");
@@ -132,10 +133,12 @@ int main(int argc, char** argv)
     profile.zones = enablePanelHeaders;
     profile.colors[panelHeaderBackground] = 0x448855;
     profile.colors[panelHeaderText] = 0xCCDDEE;
+    profile.colors[panelBorder] = 0x246810;
     check(SetThemeProfile(&profile) == ERROR_SUCCESS &&
           activeProfile.load()->zones == enablePanelHeaders &&
           activeProfile.load()->colors[panelHeaderBackground] == 0x448855 &&
-          activeProfile.load()->colors[panelHeaderText] == 0xCCDDEE, "accept panel header palette in isolation");
+          activeProfile.load()->colors[panelHeaderText] == 0xCCDDEE &&
+          activeProfile.load()->colors[panelBorder] == 0x246810, "accept panel header and border palette in isolation");
     profile.zones = enableTreeOnly;
     profile.colors[treeBackground] = 0x345678;
     check(SetThemeProfile(&profile) == ERROR_SUCCESS, "second profile");
@@ -159,6 +162,13 @@ int main(int argc, char** argv)
           "existing console disable");
     profile.version = themeProfileVersion - 1;
     check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject incompatible profile version");
+    profile.version = themeProfileVersion;
+    profile.size -= static_cast<DWORD>(sizeof(DWORD));
+    check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject v7 profile with v6 size");
+    profile.size = static_cast<DWORD>(sizeof(profile));
+    profile.colors[panelBorder] = 0x01000000;
+    check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER && activeProfile.load()->zones == 0,
+          "reject out-of-range panel border without publishing a profile");
     check(SetThemeProfile(reinterpret_cast<LPVOID>(8)) == ERROR_INVALID_PARAMETER, "reject unreadable payload");
     std::puts("PASS: profile reapply, coherent retained snapshots, deduplication, disable/reenable, console, ABI and payload checks");
 }

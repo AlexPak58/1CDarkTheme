@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "name": "Графитовая",
-  "paletteVersion": 6,
+  "paletteVersion": 7,
   "mask": 16127,
   "colors": [
     "#262629",
@@ -38,6 +38,7 @@
     "#262629",
     "#F3F0ED",
     "#262629",
-    "#F3F0ED"
+    "#F3F0ED",
+    "#49454C"
   ]
 }

@@ -43,7 +43,7 @@ constexpr COLORREF defaultDwmColor = 0xFFFFFFFF;
 
 struct Site {
     BYTE* address;
-    std::array<BYTE, 3> instruction;
+    std::array<BYTE, 4> instruction;
     DWORD protection;
     BYTE length{3};
 };
@@ -62,7 +62,13 @@ Site sites[] = {
     {nullptr, {0x49, 0x8B, 0xCE}, 0}, // mov rcx, r14
     {nullptr, {0x48, 0x8B, 0xCE}, 0}, // mov rcx, rsi
     {nullptr, {0x49, 0x8B, 0xD4}, 0}, // mov rdx, r12
+    {nullptr, {0x48, 0x8D, 0x55, 0xC0}, 0, 4}, // lea rdx, [rbp-40h]
+    {nullptr, {0x48, 0x8D, 0x55, 0xC0}, 0, 4},
+    {nullptr, {0x48, 0x8D, 0x55, 0xC0}, 0, 4},
+    {nullptr, {0x48, 0x8D, 0x55, 0xC8}, 0, 4}, // lea rdx, [rbp-38h]
+    {nullptr, {0x48, 0x8D, 0x55, 0xC8}, 0, 4},
 };
+static_assert(std::size(sites) == dockFrameFill + panel_detail::patches.size());
 #ifdef THEME_BACKGROUND_ONLY
 constexpr size_t installedSiteCount = 2;
 #else
@@ -480,16 +486,12 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
             callerAt(regs, 0x1B8) == frameBase + 0x8BB658;
         regs.Rdx = toolbarEdge ? toBgr(colors.colors[toolbarBorder]) : original;
         length = sites[toolbarEdgeStroke].length;
-    } else if (event.ExceptionAddress == sites[dockFrameFill].address) {
-        panel_detail::apply(regs, frameBase, panel_detail::Paint::DockFrame, colors);
-    } else if (event.ExceptionAddress == sites[mdiFrameFill].address) {
-        panel_detail::apply(regs, frameBase, panel_detail::Paint::MdiFrame, colors);
-    } else if (event.ExceptionAddress == sites[dockTitleFill].address) {
-        panel_detail::apply(regs, frameBase, panel_detail::Paint::DockTitle, colors);
-    } else if (event.ExceptionAddress == sites[panelCaptionText].address) {
-        panel_detail::apply(regs, frameBase, panel_detail::Paint::Caption, colors);
     } else {
-        return EXCEPTION_CONTINUE_SEARCH;
+        size_t site = dockFrameFill;
+        while (site < installedSiteCount && event.ExceptionAddress != sites[site].address) ++site;
+        if (site >= installedSiteCount) return EXCEPTION_CONTINUE_SEARCH;
+        panel_detail::apply(regs, frameBase, static_cast<panel_detail::Paint>(site - dockFrameFill), colors);
+        length = sites[site].length;
     }
     regs.Rip = reinterpret_cast<ULONG_PTR>(event.ExceptionAddress) + length;
     SetLastError(lastError);
@@ -497,6 +499,16 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
 }
 
 DWORD patchSites();
+
+bool panelPatchSignaturesMatch()
+{
+    for (size_t i = 0; i < panel_detail::patches.size(); ++i) {
+        const auto& patch = panel_detail::patches[i];
+        if (std::memcmp(sites[dockFrameFill + i].address, patch.bytes.data(), patch.bytes.size()) != 0)
+            return false;
+    }
+    return true;
+}
 
 DWORD installSites()
 {
@@ -526,13 +538,7 @@ DWORD installSites()
         if (std::memcmp(site.address, site.instruction.data(), site.length) != 0)
             return ERROR_INVALID_DATA;
     }
-    if (installedSiteCount == std::size(sites)) {
-        for (size_t i = 0; i < panel_detail::patches.size(); ++i) {
-            const auto& patch = panel_detail::patches[i];
-            if (std::memcmp(sites[dockFrameFill + i].address, patch.bytes.data(), patch.bytes.size()) != 0)
-                return ERROR_INVALID_DATA;
-        }
-    }
+    if (installedSiteCount == std::size(sites) && !panelPatchSignaturesMatch()) return ERROR_INVALID_DATA;
 
     // The process owns the handler and these module addresses until exit.
     const LPCWSTR modules[] = {
@@ -677,7 +683,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
 }
 
 #ifndef THEME_BACKGROUND_ONLY
-extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV6(LPVOID)
+extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV7(LPVOID)
 {
     return themeProfileVersion;
 }

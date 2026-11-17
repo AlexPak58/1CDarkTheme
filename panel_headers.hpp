@@ -6,13 +6,19 @@
 // Only the hash-gated 8.3.27.2325 layout. The first two fills are the local
 // frame's interior, not the content window or a caption-height rectangle.
 namespace panel_detail {
-enum class Paint : size_t { DockFrame, MdiFrame, DockTitle, Caption };
+enum class Paint : size_t { DockFrame, MdiFrame, DockTitle, Caption,
+    MdiLightPen, MdiDarkPen, MdiInnerPen, DockLightPen, DockDarkPen };
 struct Patch { ULONG_PTR rva; std::array<BYTE, 16> bytes; };
-inline constexpr std::array<Patch, 4> patches{{
+inline constexpr std::array<Patch, 9> patches{{
     {0x8BC4BE, {0x48,0x8B,0xCE,0xFF,0x15,0xA1,0x80,0x16,0x00,0x41,0x8D,0x54,0x24,0x19,0x44,0x89}},
     {0x8BAACE, {0x49,0x8B,0xCE,0xFF,0x15,0x91,0x9A,0x16,0x00,0xBA,0x19,0x00,0x00,0x00,0x44,0x89}},
     {0x8BC71D, {0x48,0x8B,0xCE,0xFF,0x15,0x42,0x7E,0x16,0x00,0xEB,0xC2,0xCC,0xCC,0xCC,0xCC,0xCC}},
-    {0x733E09, {0x49,0x8B,0xD4,0x41,0xFF,0xD1,0x89,0x44,0x24,0x7C,0x48,0x8B,0x0D,0x86,0x4E,0x69}}
+    {0x733E09, {0x49,0x8B,0xD4,0x41,0xFF,0xD1,0x89,0x44,0x24,0x7C,0x48,0x8B,0x0D,0x86,0x4E,0x69}},
+    {0x8BAAF7, {0x48,0x8D,0x55,0xC0,0x89,0x45,0xCC,0x48,0x8B,0x01,0xFF,0x50,0x18,0x4C,0x8B,0x15}},
+    {0x8BABFD, {0x48,0x8D,0x55,0xC0,0x89,0x45,0xCC,0x48,0x8B,0x01,0xFF,0x50,0x18,0x4C,0x8B,0x15}},
+    {0x8BAD0D, {0x48,0x8D,0x55,0xC0,0x48,0x8B,0x0D,0x88,0xDF,0x50,0x00,0x89,0x45,0xCC,0x44,0x89}},
+    {0x8BC4E7, {0x48,0x8D,0x55,0xC8,0x89,0x45,0xD4,0x48,0x8B,0x01,0xFF,0x50,0x18,0x4C,0x8B,0x15}},
+    {0x8BC5EB, {0x48,0x8D,0x55,0xC8,0x89,0x45,0xD4,0x48,0x8B,0x01,0xFF,0x50,0x18,0x4C,0x8B,0x15}}
 }};
 inline constexpr ULONG_PTR limit = (std::numeric_limits<ULONG_PTR>::max)();
 
@@ -75,6 +81,16 @@ inline bool ownerMatches(Reader& r, ULONG_PTR owner, ULONG_PTR frame, ULONG_PTR 
 inline bool nonempty(const RECT& rect)
 { return rect.left < rect.right && rect.top < rect.bottom; }
 
+inline bool insetMatches(const RECT& original, const RECT& inset)
+{
+    // Use wide arithmetic: malformed LONG edges must not overflow a test.
+    return nonempty(inset) &&
+        static_cast<LONGLONG>(inset.left) == static_cast<LONGLONG>(original.left) + 1 &&
+        static_cast<LONGLONG>(inset.top) == static_cast<LONGLONG>(original.top) + 1 &&
+        static_cast<LONGLONG>(inset.right) == static_cast<LONGLONG>(original.right) - 1 &&
+        static_cast<LONGLONG>(inset.bottom) == static_cast<LONGLONG>(original.bottom) - 1;
+}
+
 inline bool fillMatches(const CONTEXT& c, ULONG_PTR frame, Paint paint)
 {
     Reader r;
@@ -93,13 +109,34 @@ inline bool fillMatches(const CONTEXT& c, ULONG_PTR frame, Paint paint)
             destination.right <= original.right && destination.bottom <= original.bottom;
     }
     originalAddress = c.Rsp + 0x48;
-    if (c.Rdx != originalAddress || !r.stack(c.Rsp, 0x48, destination) || !nonempty(destination))
-        return false;
-    // Use wide arithmetic: malformed LONG edges must not overflow a test.
-    return static_cast<LONGLONG>(destination.left) == static_cast<LONGLONG>(original.left) + 1 &&
-        static_cast<LONGLONG>(destination.top) == static_cast<LONGLONG>(original.top) + 1 &&
-        static_cast<LONGLONG>(destination.right) == static_cast<LONGLONG>(original.right) - 1 &&
-        static_cast<LONGLONG>(destination.bottom) == static_cast<LONGLONG>(original.bottom) - 1;
+    return c.Rdx == originalAddress && r.stack(c.Rsp, 0x48, destination) &&
+        insetMatches(original, destination);
+}
+
+inline bool borderMatches(const CONTEXT& c, ULONG_PTR frame, Paint paint, bool dock)
+{
+    if (!frame || frame > limit - 0xB23F20 || c.Rsp > limit - 0xC0 ||
+        c.Rbp != c.Rsp + (dock ? 0x70u : 0x78u) || c.R15 != c.Rsp + 0xC0) return false;
+    Reader r;
+    ULONG_PTR caller{}, owner = c.Rsi, bar{};
+    RECT original{}, inset{};
+    if (!r.stack(c.Rsp, 0x98, caller) || caller != frame + 0x8B9C71 ||
+        !r.stack(c.Rsp, 0xC0, original) || !r.stack(c.Rsp, 0x48, inset) ||
+        !insetMatches(original, inset)) return false;
+    // Dock's saved RBX is the caller's owner. Live RBX is reused for the pen.
+    if (dock && !r.stack(c.Rsp, 0x88, owner)) return false;
+    BYTE flags{};
+    if (!ownerMatches(r, owner, frame, dock ? 0xB22788u : 0xB22710u, bar) ||
+        !r.read(owner, 0x70, flags) || !(flags & 0x20)) return false;
+    if (paint != Paint::MdiInnerPen) return true;
+    DWORD color{};
+    RECT child{};
+    return r.read(owner, 0xB4, color) && color == static_cast<DWORD>(c.Rax) &&
+        r.read(owner, 0xE0, child) && nonempty(child) &&
+        child.left > (std::numeric_limits<LONG>::min)() &&
+        child.top > (std::numeric_limits<LONG>::min)() &&
+        child.right < (std::numeric_limits<LONG>::max)() &&
+        child.bottom < (std::numeric_limits<LONG>::max)();
 }
 
 inline bool localBarMatches(Reader& r, ULONG_PTR bar, ULONG_PTR frame)
@@ -164,6 +201,14 @@ inline bool buttonMatches(const CONTEXT& c, ULONG_PTR frame)
 
 inline void apply(CONTEXT& c, ULONG_PTR frame, Paint paint, const ThemeProfile& profile)
 {
+    if (paint >= Paint::MdiLightPen) {
+        const bool dock = paint >= Paint::DockLightPen;
+        // Replay LEA even for a rejected paint. The original MOV stores EAX next.
+        c.Rdx = c.Rbp - (dock ? 0x38u : 0x40u);
+        if ((profile.zones & enablePanelHeaders) && borderMatches(c, frame, paint, dock))
+            c.Rax = toBgr(profile.colors[panelBorder]);
+        return;
+    }
     // Replay the displaced MOV even when disabled or when classification rejects.
     if (paint == Paint::Caption) c.Rdx = c.R12;
     else c.Rcx = paint == Paint::MdiFrame ? c.R14 : c.Rsi;

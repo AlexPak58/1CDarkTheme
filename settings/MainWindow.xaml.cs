@@ -215,6 +215,9 @@ public partial class MainWindow : Window
         ZoneTitle.Text = zone.Label;
         ColorRows.Children.Clear();
         _visibleInputs.Clear();
+        if (zone.Hint is { } zoneHint)
+            ColorRows.Children.Add(new TextBlock { Text = zoneHint, TextWrapping = TextWrapping.Wrap,
+                                                   Margin = new Thickness(0, 0, 0, 10) });
         for (var i = 0; i < zone.Fields.Length; i++)
         {
             var colorIndex = zone.Offset + i;

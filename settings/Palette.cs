@@ -8,14 +8,14 @@ using System.Text.Json;
 
 namespace ConfiguratorThemeSettings;
 
-internal sealed record Zone(int Bit, string Label, int Offset, string[] Fields);
+internal sealed record Zone(int Bit, string Label, int Offset, string[] Fields, string? Hint = null);
 internal sealed record Preset(string Name, int Mask, string[] Colors);
 
 internal static class Palette
 {
-    public const int Version = 6;
+    public const int Version = 7;
     public const int AllZones = 16383;
-    public const int ColorCount = 35;
+    public const int ColorCount = 36;
     public const int PanelHeaders = 8192;
     private const int DefaultZones = 7935 | PanelHeaders;
     public const int MaxPresetName = 60;
@@ -40,7 +40,9 @@ internal static class Palette
         new(1024, "Свободная полоса за кнопками", 29, ["Фон"]),
         new(2048, "Рамки верхнего меню и групп кнопок", 30, ["Цвет рамок"]),
         new(4096, "Результаты поиска", 31, ["Фон", "Текст"]),
-        new(PanelHeaders, "Рамки и заголовки панелей", 33, ["Фон рамки и заголовка", "Текст заголовка"])
+        new(PanelHeaders, "Рамки и заголовки панелей", 33,
+            ["Фон рамки и заголовка", "Текст заголовка", "Наружная рамка панелей"],
+            "Цвет контура дочерних окон и поддерживаемых рамок панелей.")
     ];
 
     private static readonly string[] Dark =
@@ -50,7 +52,7 @@ internal static class Palette
         "#1F2938", "#E5EBF5", "#A7B5C7", "#1F2938", "#E5EBF5", "#305A8A",
         "#2A374A", "#1F2938", "#E5EBF5", "#305A8A", "#2A374A", "#FFFFFF", "#000000",
         "#1F2938", "#2A374A", "#E5EBF5", "#878B8F", "#1F2938", "#3B4A60",
-        "#1F2938", "#E5EBF5", "#1F2938", "#E5EBF5"
+        "#1F2938", "#E5EBF5", "#1F2938", "#E5EBF5", "#3B4758"
     ];
 
     public static readonly Preset[] BuiltIns =
@@ -63,7 +65,7 @@ internal static class Palette
             "#262629", "#F3F0ED", "#BDB8B2", "#262629", "#F3F0ED", "#614742",
             "#3A373B", "#262629", "#F3F0ED", "#614742", "#3A373B", "#FFFFFF", "#000000",
             "#262629", "#3A373B", "#F3F0ED", "#8E8882", "#262629", "#464249",
-            "#262629", "#F3F0ED", "#262629", "#F3F0ED"
+            "#262629", "#F3F0ED", "#262629", "#F3F0ED", "#49454C"
         ]),
         new(PinkName, DefaultZones,
         [
@@ -72,7 +74,7 @@ internal static class Palette
             "#F9E7EE", "#3C2433", "#663B4F", "#F9E7EE", "#3C2433", "#E9AAC5",
             "#F6DCE7", "#F9E7EE", "#3C2433", "#E9AAC5", "#F6DCE7", "#FFFFFF", "#000000",
             "#FFF4F7", "#F6DCE7", "#3C2433", "#663B4F", "#F9E7EE", "#B47C96",
-            "#FFF4F7", "#3C2433", "#F8E1E9", "#3C2433"
+            "#FFF4F7", "#3C2433", "#F8E1E9", "#3C2433", "#B87999"
         ]),
         new(NativeName, 0, Dark)
     ];
@@ -84,6 +86,7 @@ internal static class Palette
         3 => (2047, 30),
         4 => (4095, 31),
         5 => (8191, 33),
+        6 => (16383, 35),
         Version => (AllZones, ColorCount),
         _ => throw new InvalidDataException("Неподдерживаемая версия палитры.")
     };

@@ -86,16 +86,38 @@ struct Fixture {
         stack[0x2D0 / 8] = item.address() + 0x20;
         return c;
     }
+
+    CONTEXT penContext(panel_detail::Paint paint)
+    {
+        using panel_detail::Paint;
+        const bool dock = paint == Paint::DockLightPen || paint == Paint::DockDarkPen;
+        auto c = context(dock ? Paint::DockFrame : Paint::MdiFrame);
+        c.Rip = frame + panel_detail::patches[static_cast<size_t>(paint)].rva + 1;
+        c.Rbp = c.Rsp + (dock ? 0x70 : 0x78);
+        c.Rbx = item.address();
+        if (dock) stack[0x88 / 8] = owner.address();
+        owner.put(0x70, BYTE{0x20});
+        owner.put(0xB4, static_cast<DWORD>(c.Rax));
+        owner.put(0xE0, RECT{0, 19, 400, 300});
+        return c;
+    }
 };
 
 void replay(CONTEXT c, panel_detail::Paint paint, bool recolor)
 {
     const auto index = static_cast<size_t>(paint);
+    using panel_detail::Paint;
     CONTEXT expected = c;
-    if (paint == panel_detail::Paint::Caption) expected.Rdx = c.R12;
-    else expected.Rcx = paint == panel_detail::Paint::MdiFrame ? c.R14 : c.Rsi;
-    if (recolor) expected.R8 = toBgr(paint == panel_detail::Paint::Caption ? 0xA1B2C3 : 0x102030);
-    expected.Rip = reinterpret_cast<ULONG_PTR>(sites[dockFrameFill + index].address) + 3;
+    const bool pen = paint >= Paint::MdiLightPen;
+    if (pen) {
+        expected.Rdx = c.Rbp - (paint == Paint::DockLightPen || paint == Paint::DockDarkPen ? 0x38 : 0x40);
+        if (recolor) expected.Rax = toBgr(0x3A4B5C);
+    } else {
+        if (paint == Paint::Caption) expected.Rdx = c.R12;
+        else expected.Rcx = paint == Paint::MdiFrame ? c.R14 : c.Rsi;
+        if (recolor) expected.R8 = toBgr(paint == Paint::Caption ? 0xA1B2C3 : 0x102030);
+    }
+    expected.Rip = reinterpret_cast<ULONG_PTR>(sites[dockFrameFill + index].address) + (pen ? 4 : 3);
     EXCEPTION_RECORD record{};
     record.ExceptionCode = EXCEPTION_BREAKPOINT;
     record.ExceptionAddress = sites[dockFrameFill + index].address;
@@ -103,7 +125,69 @@ void replay(CONTEXT c, panel_detail::Paint paint, bool recolor)
     SetLastError(0x1551);
     check(onBreakpoint(&exception) == EXCEPTION_CONTINUE_EXECUTION, "own site handled");
     check(GetLastError() == 0x1551, "LastError preserved");
-    check(std::memcmp(&c, &expected, sizeof(c)) == 0, "only MOV replay, RIP and accepted color change");
+    check(std::memcmp(&c, &expected, sizeof(c)) == 0, "only instruction replay, RIP and accepted color change");
+}
+
+void exercisePen(Fixture& f, ThemeProfile& profile, panel_detail::Paint paint)
+{
+    using panel_detail::Paint;
+    const auto c = f.penContext(paint);
+    replay(c, paint, true);
+    profile.zones = enableToolbarBorder; replay(c, paint, false); profile.zones = enablePanelHeaders;
+
+    const auto& site = sites[dockFrameFill + static_cast<size_t>(paint)];
+    check(site.length == 4 && std::memcmp(site.address, site.instruction.data(), 4) == 0,
+        "pen site expected four-byte LEA");
+    site.address[15] ^= 0xFF;
+    check(!panelPatchSignaturesMatch(), "reject mismatch in final signature byte");
+    site.address[15] ^= 0xFF;
+
+    const bool dock = paint == Paint::DockLightPen || paint == Paint::DockDarkPen;
+    auto wrong = c;
+    if (dock) f.stack[0x88 / 8] = f.item.address();
+    else wrong.Rsi = f.item.address();
+    replay(wrong, paint, false);
+    (void)f.penContext(paint);
+    f.owner.put(0, f.frame + 0xA8A278); replay(c, paint, false);
+    f.owner.put(0, f.frame + (dock ? 0xB22710 : 0xB22788)); replay(c, paint, false);
+    (void)f.penContext(paint);
+    f.bar.put(0x678, f.item.address()); replay(c, paint, false);
+    f.bar.put(0x678, f.owner.address());
+    f.owner.put(0xD0, f.item.address()); replay(c, paint, false);
+    f.owner.put(0xD0, f.bar.address());
+    f.owner.put(0x70, BYTE{0x10}); replay(c, paint, false);
+    f.owner.put(0x70, BYTE{0x20});
+
+    DWORD old{};
+    check(VirtualProtect(f.owner.data, 4096, PAGE_READWRITE | PAGE_GUARD, &old), "set pen owner guard");
+    replay(c, paint, false);
+    MEMORY_BASIC_INFORMATION region{};
+    check(VirtualQuery(f.owner.data, &region, sizeof(region)) && (region.Protect & PAGE_GUARD),
+        "pen owner guard rejected without consuming it");
+    check(VirtualProtect(f.owner.data, 4096, old, &old), "restore pen owner guard");
+
+    f.stack[0x98 / 8] = f.frame + 0x8B9C72; replay(c, paint, false);
+    (void)f.penContext(paint);
+    wrong = c; ++wrong.Rbp; replay(wrong, paint, false);
+    wrong = c; wrong.R15 += 4; replay(wrong, paint, false);
+    wrong = c; wrong.Rsp = wrong.Rbp = (std::numeric_limits<ULONG_PTR>::max)() - 16;
+    replay(wrong, paint, false);
+    wrong = c; wrong.Rsp = f.item.address(); wrong.Rbp = wrong.Rsp + (dock ? 0x70 : 0x78);
+    wrong.R15 = wrong.Rsp + 0xC0; replay(wrong, paint, false);
+    const RECT empty{0, 0, 0, 300}, malformed{1, 1, 400, 300};
+    std::memcpy(reinterpret_cast<void*>(c.Rsp + 0xC0), &empty, sizeof(empty));
+    replay(c, paint, false);
+    (void)f.penContext(paint);
+    std::memcpy(reinterpret_cast<void*>(c.Rsp + 0x48), &malformed, sizeof(malformed));
+    replay(c, paint, false);
+
+    if (paint == Paint::MdiInnerPen) {
+        (void)f.penContext(paint);
+        f.owner.put(0xB4, DWORD{0}); replay(c, paint, false);
+        f.owner.put(0xB4, static_cast<DWORD>(c.Rax));
+        f.owner.put(0xE0, empty); replay(c, paint, false);
+        f.owner.put(0xE0, RECT{0, 19, (std::numeric_limits<LONG>::max)(), 300}); replay(c, paint, false);
+    }
 }
 
 void exercise()
@@ -111,12 +195,18 @@ void exercise()
     using panel_detail::Paint;
     Fixture f;
     frameBase = f.frame;
-    for (size_t i = 0; i < panel_detail::patches.size(); ++i)
-        sites[dockFrameFill + i].address = f.image.data + panel_detail::patches[i].rva;
+    for (size_t i = 0; i < panel_detail::patches.size(); ++i) {
+        const auto& patch = panel_detail::patches[i];
+        auto* const address = f.image.data + patch.rva;
+        std::memcpy(address, patch.bytes.data(), patch.bytes.size());
+        sites[dockFrameFill + i].address = address;
+    }
+    check(panelPatchSignaturesMatch(), "all panel signatures accepted");
     ThemeProfile profile{};
     profile.zones = enablePanelHeaders;
     profile.colors[panelHeaderBackground] = 0x102030;
     profile.colors[panelHeaderText] = 0xA1B2C3;
+    profile.colors[panelBorder] = 0x3A4B5C;
     activeProfile.store(&profile);
     for (const auto paint : {Paint::DockFrame, Paint::MdiFrame, Paint::DockTitle, Paint::Caption}) {
         auto c = f.context(paint);
@@ -192,6 +282,9 @@ void exercise()
     f.owner.put(0xF0, RECT{-1, 0, 400, 300}); replay(title, Paint::DockTitle, false);
     title = f.context(Paint::DockTitle); title.Rsp = (std::numeric_limits<ULONG_PTR>::max)() - 16;
     replay(title, Paint::DockTitle, false);
+    for (const auto paint : {Paint::MdiLightPen, Paint::MdiDarkPen, Paint::MdiInnerPen,
+                            Paint::DockLightPen, Paint::DockDarkPen})
+        exercisePen(f, profile, paint);
     activeProfile.store(&disabledProfile);
 }
 }
@@ -199,5 +292,5 @@ void exercise()
 int main()
 {
     exercise();
-    std::puts("PASS: local frame fills, caption and glyph colors, exclusion, guard and exact register replay");
+    std::puts("PASS: local frame fills, caption and glyph colors, scoped frame pens, signatures and replay");
 }

@@ -24,7 +24,7 @@ inline constexpr ULONG_PTR enableToolbarBorder = 2048;
 inline constexpr ULONG_PTR enableSearchResults = 4096;
 inline constexpr ULONG_PTR enablePanelHeaders = 8192;
 inline constexpr DWORD themeZoneMask = 16383;
-inline constexpr DWORD themeProfileVersion = 6;
+inline constexpr DWORD themeProfileVersion = 7;
 
 enum PaletteColor : size_t {
     treeBackground, treeText, captionBackground, captionText,
@@ -37,7 +37,7 @@ enum PaletteColor : size_t {
     popupMenuBackground, popupMenuGutter, popupMenuText, popupMenuShortcut,
     toolbarBandBackground, toolbarBorder,
     searchResultsBackground, searchResultsText,
-    panelHeaderBackground, panelHeaderText,
+    panelHeaderBackground, panelHeaderText, panelBorder,
     paletteColorCount
 };
 
@@ -53,7 +53,7 @@ struct ThemeProfile {
         0x1F2938, 0xE5EBF5, 0xA7B5C7, 0x1F2938, 0xE5EBF5, 0x305A8A, 0x2A374A,
         0x1F2938, 0xE5EBF5, 0x305A8A, 0x2A374A, 0xFFFFFF, 0x000000,
         0x1F2938, 0x2A374A, 0xE5EBF5, 0x878B8F, 0x1F2938, 0x3B4A60,
-        0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5
+        0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5, 0x3B4758
     };
 };
 

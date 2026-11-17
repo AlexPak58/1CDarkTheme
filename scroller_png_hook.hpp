@@ -5,6 +5,13 @@
 #include <atomic>
 #include <intrin.h>
 
+#ifdef THEME_THUMB_SURFACE_PROBE
+namespace scroller_png_hook { struct Binding; }
+namespace thumb_surface_capture {
+inline void observe(ULONG_PTR, void*, const scroller_png_hook::Binding&);
+}
+#endif
+
 namespace scroller_png_hook {
 using PatternCreate = void* (*)(void*);
 inline constexpr ULONG_PTR iatRva = 0xC7BE0, originalRva = 0x34BA0;
@@ -47,6 +54,13 @@ inline void* patternForSurface(void* surface, const Binding& state,
 inline void* createPattern(void* surface)
 {
     const auto state = published.load(std::memory_order_acquire);
+#ifdef THEME_THUMB_SURFACE_PROBE
+    // Pass the original caller's stack address before the observer adds frames.
+    // This code is absent from the normal production build.
+    const auto observerError = GetLastError();
+    thumb_surface_capture::observe(reinterpret_cast<ULONG_PTR>(_AddressOfReturnAddress()), surface, *state);
+    SetLastError(observerError);
+#endif
     const auto profile = state->profile->load(std::memory_order_acquire);
     if (!(profile->zones & enableScrollerPng)) return state->original(surface);
     const auto incomingError = GetLastError();

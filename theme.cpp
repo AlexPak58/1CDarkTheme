@@ -6,6 +6,9 @@
 #include "dock_splitters.hpp"
 #include "scroller_corner.hpp"
 #include "scroller_png_hook.hpp"
+#ifdef THEME_THUMB_SURFACE_PROBE
+#include "thumb_surface_capture.hpp"
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -707,6 +710,19 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
     ReleaseSRWLockExclusive(&installationLock);
     return result;
 }
+
+#ifdef THEME_THUMB_SURFACE_PROBE
+extern "C" __declspec(dllexport) DWORD WINAPI ThumbSurfaceProbeAbiV2(LPVOID)
+{
+    return thumbSurfaceProbeVersion;
+}
+
+extern "C" __declspec(dllexport) DWORD WINAPI RunThumbSurfaceProbeV2(LPVOID output)
+{
+    if (!inDesigner()) return ERROR_NOT_SUPPORTED;
+    return thumb_surface_capture::run(output);
+}
+#endif
 
 #ifndef THEME_BACKGROUND_ONLY
 extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV10(LPVOID)

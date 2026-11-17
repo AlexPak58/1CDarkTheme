@@ -14,6 +14,15 @@ set "THEME_DLL_NAME=tree-theme.dll"
 set "THEME_LAUNCHER_NAME=tree-theme-run.exe"
 set "THEME_DLL_FLAGS="
 set "THEME_LAUNCHER_FLAGS="
+set "THEME_BUILD_SETTINGS="
+set "THEME_BUILD_THUMB_PROBE="
+if /i "%~2"=="settings" set "THEME_BUILD_SETTINGS=1"
+if /i "%~2"=="thumb-surface-probe" set "THEME_BUILD_THUMB_PROBE=1"
+if /i "%~2"=="settings-thumb-probe" (
+    set "THEME_BUILD_THUMB_PROBE=1"
+    set "THEME_BUILD_SETTINGS=1"
+)
+if defined THEME_BUILD_THUMB_PROBE set "THEME_DLL_FLAGS=/DTHEME_THUMB_SURFACE_PROBE"
 if /i "%~2"=="counter-probe" (
     set "THEME_SOURCE=search_counter_probe.cpp"
     set "THEME_LAUNCHER_SOURCE=counter_probe_launcher.cpp"
@@ -116,7 +125,11 @@ cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 %THEME_DLL_FLAGS% /LD "%THEME
 if errorlevel 1 goto failed
 cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 %THEME_LAUNCHER_FLAGS% "%THEME_LAUNCHER_SOURCE%" /Fo"%THEME_BUILD_DIR%\launcher.obj" /Fe"%THEME_BUILD_DIR%\%THEME_LAUNCHER_NAME%" bcrypt.lib user32.lib
 if errorlevel 1 goto failed
-if /i "%~2"=="settings" (
+if defined THEME_BUILD_THUMB_PROBE (
+    cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 "thumb_surface_probe_launcher.cpp" /Fo"%THEME_BUILD_DIR%\thumb-launcher.obj" /Fe"%THEME_BUILD_DIR%\thumb-surface-probe-run.exe" bcrypt.lib user32.lib
+    if errorlevel 1 goto failed
+)
+if defined THEME_BUILD_SETTINGS (
     dotnet build settings\ConfiguratorThemeSettings.csproj -c Release --artifacts-path "%THEME_BUILD_DIR%\dotnet" -o "%THEME_BUILD_DIR%"
     if errorlevel 1 goto failed
 )

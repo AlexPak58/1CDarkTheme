@@ -35,6 +35,16 @@ if /i "%~2"=="spreadsheet-outline-trace" (
     set "THEME_DLL_FLAGS=/DTHEME_OUTLINE_TRACE"
     set "THEME_LAUNCHER_FLAGS=/DTHEME_OUTLINE_TRACE"
 )
+if /i "%~2"=="spreadsheet-grid-trace" (
+    set "THEME_SOURCE=cairo_experiment.cpp"
+    set "THEME_DLL_FLAGS=/DTHEME_GRID_TRACE"
+    set "THEME_LAUNCHER_FLAGS=/DTHEME_GRID_TRACE"
+)
+if /i "%~2"=="spreadsheet-grid-color-test" (
+    set "THEME_SOURCE=cairo_experiment.cpp"
+    set "THEME_DLL_FLAGS=/DTHEME_GRID_TRACE /DTHEME_GRID_COLOR_TEST"
+    set "THEME_LAUNCHER_FLAGS=/DTHEME_GRID_TRACE"
+)
 if /i "%~2"=="int3" set "THEME_LAUNCHER_FLAGS=/DTHEME_BENCHMARK"
 if /i "%~2"=="int3-bg" (
     set "THEME_DLL_FLAGS=/DTHEME_BACKGROUND_ONLY"

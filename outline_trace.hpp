@@ -68,9 +68,13 @@ struct OutlineTraceSample {
     DWORD calls{};
 };
 
+enum class TraceOutcome { Caller, Bounds, Graphics, Renderer, InvalidSample, Match, Count };
+using TraceStageCounts = std::array<ULONGLONG, static_cast<size_t>(TraceOutcome::Count)>;
+
 struct OutlineTrace {
     std::array<OutlineTraceSample, 16> outlines{};
     DWORD otherCalls{};
+    std::array<TraceStageCounts, 2> stages{}; // RGB, RGBA
 };
 
-static_assert(sizeof(OutlineTrace) == 580);
+static_assert(sizeof(OutlineTrace) == 680);

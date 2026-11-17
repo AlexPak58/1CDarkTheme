@@ -5,9 +5,14 @@
 #include "form_line_trace.hpp"
 #elif defined(THEME_OUTLINE_TRACE)
 #include "outline_trace.hpp"
+#elif defined(THEME_GRID_TRACE)
+#include "grid_trace.hpp"
 #endif
 
-#if defined(THEME_FORM_LINE_TRACE) || defined(THEME_OUTLINE_TRACE)
+#if defined(THEME_OUTLINE_TRACE) || defined(THEME_GRID_TRACE)
+#define THEME_SPREADSHEET_TRACE
+#endif
+#if defined(THEME_FORM_LINE_TRACE) || defined(THEME_SPREADSHEET_TRACE)
 #define THEME_DOCUMENT_TRACE
 #endif
 #if defined(THEME_TOOLTIP_TRACE) || defined(THEME_DOCUMENT_TRACE)
@@ -114,7 +119,10 @@ using TraceResult = FormLineTrace;
 constexpr char traceExport[] = "ReadFormLineTrace";
 #elif defined(THEME_OUTLINE_TRACE)
 using TraceResult = OutlineTrace;
-constexpr char traceExport[] = "ReadOutlineTrace";
+constexpr char traceExport[] = "ReadOutlineTraceV2";
+#elif defined(THEME_GRID_TRACE)
+using TraceResult = GridTrace;
+constexpr char traceExport[] = "ReadGridTraceV4";
 #endif
 
 #ifdef THEME_CAIRO_TRACE
@@ -137,7 +145,30 @@ DWORD readTrace(HANDLE child, DWORD pid, const std::wstring& dll)
     VirtualFreeEx(child, output, 0, MEM_RELEASE);
     if (error) return error;
 
-#ifdef THEME_OUTLINE_TRACE
+#ifdef THEME_GRID_TRACE
+    std::puts("Spreadsheet grid rectangles (x, y, width, height, calls since previous read):");
+    for (const auto& sample : trace.rectangles) {
+        const auto& rect = sample.rectangle;
+        if (sample.calls) std::printf("  moxelui+0x%lX (%g, %g, %g, %g) %lu\n",
+            sample.rendererReturn, rect[0], rect[1], rect[2], rect[3], sample.calls);
+    }
+    std::puts("Spreadsheet grid solid colors (RGBA, calls since previous read):");
+    for (const auto& sample : trace.colors) {
+        if (sample.calls) std::printf("  %s moxelui+0x%lX #%08lX %lu\n",
+            sample.mask ? "RGBA mask" : "RGB", sample.rendererReturn, sample.rgba, sample.calls);
+    }
+    std::printf("  Other rectangles: %lu; other colors: %lu\n", trace.otherRectangles, trace.otherColors);
+    std::puts("moxelui code-address candidates for rectangles rejected by the renderer check:");
+    for (const auto& sample : trace.rendererCandidates) {
+        if (!sample.calls) continue;
+        std::printf("  stack+0x%lX moxelui+0x%lX total=%lu one-pixel=%lu",
+            sample.stackOffset, sample.rva, sample.calls, sample.onePixel);
+        if (sample.moxelCaller) std::printf(" moxel+0x%lX", sample.moxelCaller);
+        std::putchar('\n');
+    }
+    std::printf("  Rectangles without candidates: %lu; other candidate observations: %lu\n",
+                trace.noRenderer, trace.otherRenderers);
+#elif defined(THEME_OUTLINE_TRACE)
     std::puts("Spreadsheet outline samples (coordinates, colors and calls since previous read):");
     for (const auto& sample : trace.outlines) {
         if (sample.calls) std::printf("  %s moxelui+0x%lX (%ld, %ld, %ld, %ld) input=0x%08lX #%08lX %lu\n",
@@ -157,7 +188,19 @@ DWORD readTrace(HANDLE child, DWORD pid, const std::wstring& dll)
         if (color.calls) std::printf("  #%08lX %lu\n", color.rgba, color.calls);
     }
 #endif
+#ifndef THEME_GRID_TRACE
     std::printf("  Other calls: %lu\n", trace.otherCalls);
+#endif
+#ifdef THEME_SPREADSHEET_TRACE
+    constexpr const char* hookNames[] = {"RGB", "RGBA", "Rectangle"};
+    std::puts("Cairo IAT entries and outcomes (calls since previous read):");
+    for (size_t i = 0; i < trace.stages.size(); ++i) {
+        const auto& [caller, bounds, graphics, renderer, invalid, match] = trace.stages[i];
+        const auto total = caller + bounds + graphics + renderer + invalid + match;
+        std::printf("  %s total=%llu caller=%llu bounds=%llu graphics=%llu renderer=%llu invalid=%llu match=%llu\n",
+                    hookNames[i], total, caller, bounds, graphics, renderer, invalid, match);
+    }
+#endif
     std::fflush(stdout);
     return ERROR_SUCCESS;
 }
@@ -341,7 +384,7 @@ bool benchmark(HANDLE child, DWORD pid)
 
 int wmain(int argc, wchar_t** argv)
 {
-#ifdef THEME_OUTLINE_TRACE
+#ifdef THEME_SPREADSHEET_TRACE
     const bool designer = argc == 4 && std::wstring_view(argv[3]) == L"--designer";
     if (designer) --argc;
     if (argc != 3 || !serverRef(argv[2])) {
@@ -390,9 +433,9 @@ int wmain(int argc, wchar_t** argv)
 #elif defined(THEME_FORM_LINE_TRACE)
     if (!findFormLineTracePlatform(exe)) {
         std::fputs("Unsupported client hash for form-line-trace. See RESEARCH.md for supported builds.\n", stderr);
-#elif defined(THEME_OUTLINE_TRACE)
+#elif defined(THEME_SPREADSHEET_TRACE)
     if (!findOutlineTracePlatform(exe, designer)) {
-        std::fputs("Unsupported client hash or mode for spreadsheet-outline-trace. See RESEARCH.md.\n", stderr);
+        std::fputs("Unsupported client hash or mode for spreadsheet tracing. See RESEARCH.md.\n", stderr);
 #else
     if (!matchesSha256(exe, exeHash)) {
         std::fputs("Unsupported 1cv8.exe (expected 8.3.27.2325 x64).\n", stderr);
@@ -413,7 +456,7 @@ int wmain(int argc, wchar_t** argv)
         return 2;
     }
     const wchar_t* mode = L" ENTERPRISE ";
-#ifdef THEME_OUTLINE_TRACE
+#ifdef THEME_SPREADSHEET_TRACE
     if (designer) mode = L" DESIGNER ";
 #endif
 #else
@@ -432,7 +475,7 @@ int wmain(int argc, wchar_t** argv)
     CloseHandle(process.hThread);
     if (profileMode) return applyLaunchProfile(child, process.dwProcessId, dll, profile);
 #ifdef THEME_CAIRO_TRACE
-#ifdef THEME_OUTLINE_TRACE
+#ifdef THEME_SPREADSHEET_TRACE
     std::printf("Started %s PID %lu. Open the spreadsheet first.\n",
                 designer ? "Configurator" : "Enterprise", process.dwProcessId);
 #elif defined(THEME_FORM_LINE_TRACE)
@@ -497,6 +540,8 @@ int wmain(int argc, wchar_t** argv)
         std::puts(action == 'e' ? "frmcore line trace enabled." : "frmcore line trace disabled.");
 #elif defined(THEME_OUTLINE_TRACE)
         std::puts(action == 'e' ? "Spreadsheet outline trace enabled." : "Spreadsheet outline trace disabled.");
+#elif defined(THEME_GRID_TRACE)
+        std::puts(action == 'e' ? "Spreadsheet grid trace enabled." : "Spreadsheet grid trace disabled.");
 #else
         std::puts(action == 'e' ? "Theme enabled. Repaint the tree." :
                                   "Theme disabled. Repaint the tree.");

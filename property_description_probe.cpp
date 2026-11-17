@@ -8,7 +8,7 @@
 namespace {
 
 using namespace propertyDescription;
-constexpr ULONGLONG captureMs = 15000;
+constexpr ULONGLONG captureMs = propertyProbeCaptureMs;
 constexpr ULONGLONG drainMs = 100;
 constexpr char breakpoint = static_cast<char>(0xCC);
 constexpr std::array<DWORD, 2> returnRvas{0x5D1545, 0x3E796C};
@@ -49,19 +49,24 @@ struct StackRange {
 
 template <typename Reader = GuardedReader>
 Outcome captureIdentity(const CONTEXT& ctx, ULONG_PTR frame, Identity& identity, PropertyRect& rect,
-                        const Reader& read = {})
+                        const Reader& read = {}, Stage* stage = nullptr)
 {
+    setStage(stage, Stage::Input);
     if (!frame || !ctx.Rbp) return Outcome::ReadFailure;
     StackRange stack;
     GetCurrentThreadStackLimits(&stack.low, &stack.high);
+    setStage(stage, Stage::Stack);
     ULONG_PTR caller{}, parent{};
     if (!stack.readAt(ctx.Rsp, 0xA8, caller) || !stack.readAt(ctx.Rsp, 0x188, parent))
         return Outcome::ReadFailure;
+    setStage(stage, Stage::Returns);
     if (!matchesRva(frame, caller, returnRvas[0]) || !matchesRva(frame, parent, returnRvas[1]))
         return Outcome::Mismatch;
     // The type-13 branch passes the inset RECT instead of the ordinary paint RECT.
+    setStage(stage, Stage::RectAddress);
     if (!matchesOffset(ctx.Rsp, 0x270, ctx.R14) && !matchesOffset(ctx.Rsp, 0x120, ctx.R14))
         return Outcome::Mismatch;
+    setStage(stage, Stage::RectValues);
     LONG width{}, height{};
     DWORD rop{};
     if (!stack.read(ctx.R14, rect) || !stack.readAt(ctx.Rsp, 0x20, width) ||
@@ -71,7 +76,7 @@ Outcome captureIdentity(const CONTEXT& ctx, ULONG_PTR frame, Identity& identity,
         static_cast<LONG>(ctx.R8) != rect.left || static_cast<LONG>(ctx.R9) != rect.top ||
         static_cast<LONGLONG>(rect.right) - rect.left != width ||
         static_cast<LONGLONG>(rect.bottom) - rect.top != height) return Outcome::Mismatch;
-    return inspect(frame, ctx.Rdi, identity, read);
+    return inspect(frame, ctx.Rdi, identity, read, stage);
 }
 
 void recordSample(const Identity& identity, const PropertyRect& rect)
@@ -100,9 +105,12 @@ void recordCall(const CONTEXT& context, ULONG_PTR frame)
     }
     Identity identity{};
     PropertyRect rect{};
-    switch (captureIdentity(context, frame, identity, rect)) {
-    case Outcome::ReadFailure: ++counts.readFailures; break;
-    case Outcome::Mismatch: ++counts.mismatches; break;
+    Stage stage{};
+    switch (captureIdentity(context, frame, identity, rect, GuardedReader{}, &stage)) {
+    case Outcome::ReadFailure:
+        ++counts.readFailures; ++counts.rejectedStages[static_cast<size_t>(stage)]; break;
+    case Outcome::Mismatch:
+        ++counts.mismatches; ++counts.rejectedStages[static_cast<size_t>(stage)]; break;
     case Outcome::Accepted: recordSample(identity, rect); break;
     }
     ReleaseSRWLockExclusive(&sampleLock);
@@ -350,12 +358,12 @@ DWORD publish(void* output, const PropertyProbeTrace& trace, DWORD result)
 
 } // namespace
 
-extern "C" __declspec(dllexport) DWORD WINAPI PropertyDescriptionProbeAbiV1(void*)
+extern "C" __declspec(dllexport) DWORD WINAPI PropertyDescriptionProbeAbiV2(void*)
 {
     return propertyProbeVersion;
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI RunPropertyDescriptionProbeV1(void* output)
+extern "C" __declspec(dllexport) DWORD WINAPI RunPropertyDescriptionProbeV2(void* output)
 {
     if (!validInput(output)) return ERROR_INVALID_PARAMETER;
     PropertyProbeTrace trace;

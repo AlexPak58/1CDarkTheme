@@ -134,6 +134,14 @@ int wmain(int argc, wchar_t** argv)
     trace.counts.list = 3;
     trace.counts.foreignId10 = 4;
     require(validTrace(trace), "validate numeric classes and reconcile totals");
+    trace.counts.mismatches = 1;
+    require(!validTrace(trace), "reject missing rejection stage totals");
+    trace.counts.rejectedStages[static_cast<size_t>(Stage::Returns)] = 1;
+    require(validTrace(trace), "reconcile bounded rejection stage totals");
+    trace.counts.rejectedStages[static_cast<size_t>(Stage::Owner)] = 1;
+    require(!validTrace(trace), "reject excess rejection stage totals");
+    trace.counts.mismatches = 0;
+    trace.counts.rejectedStages = {};
     trace.samples[0].identity.managerViewRva = managerTypes[1][1];
     require(!validTrace(trace), "mixed manager pair cannot pass reply validation");
     trace.samples[0].identity.managerViewRva = managerTypes[0][1];

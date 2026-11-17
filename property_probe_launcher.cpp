@@ -73,6 +73,13 @@ bool validTrace(const PropertyProbeTrace& trace)
     if (trace.size != sizeof(trace) || trace.version != propertyProbeVersion ||
         trace.sampleCount > propertyProbeCapacity) return false;
     auto totals = trace.counts;
+    if (totals.mismatches > MAXULONGLONG - totals.readFailures) return false;
+    auto rejected = totals.mismatches + totals.readFailures;
+    for (const auto count : totals.rejectedStages) {
+        if (count > rejected) return false;
+        rejected -= count;
+    }
+    if (rejected) return false;
     for (DWORD i = 0; i < trace.sampleCount; ++i) {
         const auto& sample = trace.samples[i];
         const auto& id = sample.identity;
@@ -104,8 +111,19 @@ struct ProbeCallResult {
 
 using ProbeCall = DWORD (*)(HANDLE, ULONG_PTR, LPVOID, DWORD&);
 
+DWORD remotePropertyProbeCall(HANDLE process, ULONG_PTR address, LPVOID arg, DWORD& result)
+{
+    const Handle worker(CreateRemoteThread(process, nullptr, 0,
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(address), arg, 0, nullptr));
+    if (!static_cast<HANDLE>(worker)) return GetLastError();
+    // The diagnostic capture outlives the production launcher's 30-second wait.
+    // An uncertain started worker must retain its payload and never be retried.
+    if (WaitForSingleObject(worker, propertyProbeWaitMs) != WAIT_OBJECT_0) return WAIT_TIMEOUT;
+    return GetExitCodeThread(worker, &result) ? ERROR_SUCCESS : WAIT_TIMEOUT;
+}
+
 ProbeCallResult callPropertyProbe(HANDLE process, ULONG_PTR run, PropertyProbeTrace& trace,
-                                 ProbeCall call = remoteCall)
+                                 ProbeCall call = remotePropertyProbeCall)
 {
     ProbeCallResult outcome;
     const auto payload = VirtualAllocEx(process, nullptr, sizeof(trace), MEM_RESERVE | MEM_COMMIT,
@@ -271,6 +289,11 @@ int propertyProbeToDesigner(DWORD pid, ULONGLONG creation)
                     propertyDescription::windowDrawTypeRva, propertyDescription::ownerTypeRva,
                     propertyDescription::siteTypeRva, propertyDescription::idTypeRva,
                     id.managerRva, id.managerViewRva, id.rawColor);
+    }
+    std::printf("],\"rejectedStages\":[");
+    for (size_t i = 0; i < counts.rejectedStages.size(); ++i) {
+        if (i) std::putchar(',');
+        std::printf("%llu", counts.rejectedStages[i]);
     }
     std::puts("]}");
     return 0;

@@ -142,7 +142,8 @@ void testCapture()
     put(stack, 0x30, DWORD{0x00F00021});
     Identity id{};
     PropertyRect actual{};
-    const auto capture = [&] { return captureIdentity(ctx, fakeFrame, id, actual, ImageFixtureReader{}); };
+    Stage stage{};
+    const auto capture = [&] { return captureIdentity(ctx, fakeFrame, id, actual, ImageFixtureReader{}, &stage); };
     for (size_t pair = 0; pair < managerTypes.size(); ++pair) {
         objects.setManager(pair, pair);
         objects.setId(10);
@@ -163,12 +164,14 @@ void testCapture()
     put(objects.form, 0, fakeFrame + formTypeRva);
     objects.setManager(0, 1);
     require(capture() == Outcome::Mismatch, "mixed manager pair rejected");
+    require(stage == Stage::ManagerTables, "identify rejected manager tables");
     objects.setManager(0, 0);
     put(objects.manager, 0x38, address(objects.form));
     require(capture() == Outcome::Mismatch, "wrong manager backlink rejected");
     put(objects.manager, 0x38, address(objects.form, 0x28));
     put(objects.owner, 0x970, objects.draw);
     require(capture() == Outcome::Mismatch, "wrong window backlink rejected");
+    require(stage == Stage::Owner, "identify rejected owner backlink");
     put(objects.owner, 0x970, address(objects.window));
     put(objects.owner, 0x528, address(objects.site));
     require(capture() == Outcome::Mismatch, "wrong ID interface relationship rejected");
@@ -178,9 +181,11 @@ void testCapture()
     put(objects.owner, 0x5E8, ULONG_PTR{1});
     put(stack, 0x188, fakeFrame + returnRvas[1] + 1);
     require(capture() == Outcome::Mismatch, "wrong outer return site rejected");
+    require(stage == Stage::Returns, "identify rejected call chain before object reads");
     put(stack, 0x188, fakeFrame + returnRvas[1]);
     put(stack, 0x30, DWORD{0xCC0020});
     require(capture() == Outcome::Mismatch, "wrong ROP rejected");
+    require(stage == Stage::RectValues, "identify rejected geometry or ROP");
     put(stack, 0x30, DWORD{0xF00021});
     put(stack, 0x20, LONG{303});
     require(capture() == Outcome::Mismatch, "RECT and PatBlt arguments must agree");
@@ -225,6 +230,8 @@ void testCountsAndContext()
     require(onBreakpoint(&exception) == EXCEPTION_CONTINUE_EXECUTION && GetLastError() == 0x4321 &&
         !std::memcmp(&ctx, &expected, sizeof(ctx)) && counts.readFailures == 1,
         "replay modifies only RDX and RIP and preserves LastError after failed collection");
+    require(counts.rejectedStages[static_cast<size_t>(Stage::Stack)] == 1,
+        "record the numeric rejection stage without exposing memory");
     AcquireSRWLockExclusive(&sampleLock);
     require(onBreakpoint(&exception) == EXCEPTION_CONTINUE_EXECUTION, "replay when sample lock is busy");
     ReleaseSRWLockExclusive(&sampleLock);
@@ -326,17 +333,17 @@ void testPatch()
 int main()
 {
     PropertyProbeTrace trace;
-    require(PropertyDescriptionProbeAbiV1(nullptr) == propertyProbeVersion, "diagnostic ABI");
+    require(PropertyDescriptionProbeAbiV2(nullptr) == propertyProbeVersion, "diagnostic ABI");
     trace.version = 0;
-    require(RunPropertyDescriptionProbeV1(&trace) == ERROR_INVALID_PARAMETER && !attempted,
+    require(RunPropertyDescriptionProbeV2(&trace) == ERROR_INVALID_PARAMETER && !attempted,
         "wrong ABI rejected before one-shot");
     trace.version = propertyProbeVersion;
     trace.size = sizeof(DWORD) * 2;
-    require(RunPropertyDescriptionProbeV1(&trace) == ERROR_INVALID_PARAMETER && !attempted,
+    require(RunPropertyDescriptionProbeV2(&trace) == ERROR_INVALID_PARAMETER && !attempted,
         "short payload rejected before one-shot");
     trace.size = sizeof(trace);
     attempted = true;
-    require(RunPropertyDescriptionProbeV1(&trace) == ERROR_ALREADY_EXISTS, "reject rearming");
+    require(RunPropertyDescriptionProbeV2(&trace) == ERROR_ALREADY_EXISTS, "reject rearming");
     testCapture();
     testCountsAndContext();
     testPatch();

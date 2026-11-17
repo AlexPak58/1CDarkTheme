@@ -86,6 +86,13 @@ struct GuardedReader {
 
 enum class Kind : DWORD { Description = 1, List, ForeignId10 };
 enum class Outcome { Accepted, Mismatch, ReadFailure };
+enum class Stage : DWORD {
+    Input, Stack, Returns, RectAddress, RectValues, WindowTables, DrawMethod,
+    Owner, Site, ControlId, FormTables, OuterTables, ShellLinks, ManagerTables,
+    ManagerLinks, FamilyId, Count
+};
+
+inline void setStage(Stage* output, Stage stage) { if (output) *output = stage; }
 
 struct Identity {
     Kind kind{};
@@ -107,8 +114,9 @@ inline bool matchesOffset(ULONG_PTR base, ULONG_PTR offset, ULONG_PTR value)
 // A table from this exact image is evidence of an explicit mismatch.
 // Missing/unreadable links and inconsistent backlinks are kept separate.
 template <typename Reader>
-Outcome inspectFamily(const Reader& read, ULONG_PTR frame, ULONG_PTR form, Identity& id)
+Outcome inspectFamily(const Reader& read, ULONG_PTR frame, ULONG_PTR form, Identity& id, Stage* stage = nullptr)
 {
+    setStage(stage, Stage::FormTables);
     if (!form) return Outcome::ReadFailure;
     ULONG_PTR formTable{}, formViewTable{};
     if (!read.read(form, 0, formTable) || !read.read(form, 0x28, formViewTable) ||
@@ -122,6 +130,7 @@ Outcome inspectFamily(const Reader& read, ULONG_PTR frame, ULONG_PTR form, Ident
     if (!matchesRva(frame, formTable, formTypeRva) || !matchesRva(frame, formViewTable, formViewTypeRva))
         return foreign();
 
+    setStage(stage, Stage::OuterTables);
     ULONG_PTR outer{}, outerTable{}, shellTable{}, shellForm{}, shellFormView{};
     if (!read.read(form, 0x4A0, outer) || outer <= 0x10) return Outcome::ReadFailure;
     const auto shell = outer - 0x10;
@@ -130,11 +139,13 @@ Outcome inspectFamily(const Reader& read, ULONG_PTR frame, ULONG_PTR form, Ident
         !read.imageTable(frame, shellTable, sizeof(ULONG_PTR))) return Outcome::ReadFailure;
     if (!matchesRva(frame, outerTable, outerTypeRva) || !matchesRva(frame, shellTable, shellTypeRva))
         return foreign();
+    setStage(stage, Stage::ShellLinks);
     if (!read.read(shell, 0x28, shellForm) || !read.read(shell, 0x30, shellFormView) ||
         !shellForm || !shellFormView) return Outcome::ReadFailure;
     if (!matchesOffset(shellForm, 0x18, form) || !matchesOffset(form, 0x28, shellFormView))
         return Outcome::Mismatch;
 
+    setStage(stage, Stage::ManagerTables);
     ULONG_PTR manager{}, shellManagerView{}, managerTable{}, managerViewTable{};
     if (!read.read(shell, 0x70, manager) || !read.read(shell, 0x18, shellManagerView) ||
         !shellManagerView || !read.read(manager, 0, managerTable) ||
@@ -153,12 +164,14 @@ Outcome inspectFamily(const Reader& read, ULONG_PTR frame, ULONG_PTR form, Ident
         return foreign();
     }
 
+    setStage(stage, Stage::ManagerLinks);
     ULONG_PTR managerHost{}, managerShell{}, managerFormView{};
     if (!read.read(manager, 0x28, managerHost) || !read.read(manager, 0x30, managerShell) ||
         !read.read(manager, 0x38, managerFormView) || !managerHost || !managerShell || !managerFormView)
         return Outcome::ReadFailure;
     if (!matchesOffset(managerHost, 0x18, shell) || managerShell != shell || managerFormView != shellFormView)
         return Outcome::Mismatch;
+    setStage(stage, Stage::FamilyId);
     if (id.controlId != 8 && id.controlId != 10) return Outcome::Mismatch;
     id.kind = id.controlId == 10 ? Kind::Description : Kind::List;
     id.managerRva = static_cast<DWORD>(managerTable - frame);
@@ -167,8 +180,9 @@ Outcome inspectFamily(const Reader& read, ULONG_PTR frame, ULONG_PTR form, Ident
 }
 
 template <typename Reader = GuardedReader>
-Outcome inspect(ULONG_PTR frame, ULONG_PTR windowDraw, Identity& id, const Reader& read = {})
+Outcome inspect(ULONG_PTR frame, ULONG_PTR windowDraw, Identity& id, const Reader& read = {}, Stage* stage = nullptr)
 {
+    setStage(stage, Stage::WindowTables);
     id = {};
     if (!frame || windowDraw <= 0x160) return Outcome::ReadFailure;
     const auto window = windowDraw - 0x160;
@@ -178,10 +192,12 @@ Outcome inspect(ULONG_PTR frame, ULONG_PTR windowDraw, Identity& id, const Reade
         return Outcome::Mismatch;
     if (!read.imageTable(frame, windowTable, sizeof(ULONG_PTR)) ||
         !read.imageTable(frame, drawTable, 0x120 + sizeof(ULONG_PTR))) return Outcome::ReadFailure;
+    setStage(stage, Stage::DrawMethod);
     ULONG_PTR drawMethod{};
     if (!read.read(drawTable, 0x120, drawMethod)) return Outcome::ReadFailure;
     if (!matchesRva(frame, drawMethod, 0x5D3230)) return Outcome::Mismatch;
 
+    setStage(stage, Stage::Owner);
     ULONG_PTR owner{}, ownerWindow{}, ownerTable{}, brushSource{}, brush{};
     if (!read.read(windowDraw, 0x260, owner) || !read.read(owner, 0x970, ownerWindow) ||
         !read.read(owner, 0x2E0, ownerTable) || !read.read(windowDraw, 0x68, brushSource) ||
@@ -191,18 +207,20 @@ Outcome inspect(ULONG_PTR frame, ULONG_PTR windowDraw, Identity& id, const Reade
         !matchesOffset(owner, 0x5C8, brushSource)) return Outcome::Mismatch;
     if (!read.imageTable(frame, ownerTable, sizeof(ULONG_PTR))) return Outcome::ReadFailure;
 
+    setStage(stage, Stage::Site);
     ULONG_PTR site{}, control{}, siteTable{}, idTable{}, form{}, method{};
     if (!read.read(owner, 0x2A8, site) || !read.read(owner, 0x528, control) ||
         !read.read(site, 0, siteTable) || !read.read(control, 0, idTable)) return Outcome::ReadFailure;
     if (!matchesOffset(site, 0x18, control) || !matchesRva(frame, siteTable, siteTypeRva) ||
         !matchesRva(frame, idTable, idTypeRva)) return Outcome::Mismatch;
+    setStage(stage, Stage::ControlId);
     if (!read.imageTable(frame, siteTable, sizeof(ULONG_PTR)) ||
         !read.imageTable(frame, idTable, 0x18 + sizeof(ULONG_PTR)) ||
         !read.read(idTable, 0x18, method) || !read.read(control, 0x114, id.controlId) ||
         !read.read(site, 8, form)) return Outcome::ReadFailure;
     if (!matchesRva(frame, method, 0x7C1670) || (id.controlId != 8 && id.controlId != 10))
         return Outcome::Mismatch;
-    return inspectFamily(read, frame, form, id);
+    return inspectFamily(read, frame, form, id, stage);
 }
 
 } // namespace propertyDescription

@@ -484,6 +484,41 @@ def search_grid_window_colors(image, rva, code, ranges, imports, vtable):
     return None
 
 
+def search_grid_alternating_palette(rva, code, ranges, after_resolve, method_end):
+    tail = code[after_resolve - rva:method_end - rva]
+    # Immediately after resolving the Color, cache eax on the grid receiver.
+    cache = re.match(rb"(?:\xba\x06\x00\x00\x00)?\x41\x89\x86(.{4})", tail, re.S)
+    if cache is None:
+        return None
+    # The refresh finishes by rebuilding the palette of a separate object.
+    update_calls = re.finditer(rb"\x49\x8b\x8e(.{4})\xe8(.{4})\xb0\x01", tail, re.S)
+    white, alternating = ((0x70, rb"\x41\x89\x47\x74") if cache.start(1) == 3
+                          else (0x7C, rb"\x41\x89\x87\x80\x00\x00\x00"))
+    pair = re.compile(
+        rb"\x41\xc7\x47" + re.escape(bytes((white,))) + rb"\xff\xff\xff\x00\x8b\x81"
+        + re.escape(cache[1]) + alternating,
+    )
+    for call in update_calls:
+        updater = after_resolve + call.end(2) + struct.unpack("<i", call[2])[0]
+        updater_end = ranges.get(updater, 0)
+        if not rva <= updater < updater_end <= rva + len(code):
+            continue
+        matches = list(pair.finditer(code, updater - rva, updater_end - rva))
+        if len(matches) != 2:
+            continue
+        return {
+            "cache_offset": f"0x{struct.unpack('<I', cache[1])[0]:X}",
+            "cache_write": f"0x{after_resolve + cache.start(1) - 3:X}",
+            "palette_receiver_offset": f"0x{struct.unpack('<I', call[1])[0]:X}",
+            "palette_updater": f"0x{updater:X}",
+            "palette_call": f"0x{after_resolve + call.start(2) - 1:X}",
+            "fixed_white_writes": [f"0x{rva + match.start():X}" for match in matches],
+            "white_offset": f"0x{white:X}",
+            "alternating_offset": f"0x{white + 4:X}",
+        }
+    return None
+
+
 def search_grid_candidates(image, rva, code):
     ranges = dict(image.function_ranges())
     imports = {slot: symbol for _, symbol, slot in image.imports()}
@@ -548,6 +583,8 @@ def search_grid_candidates(image, rva, code):
                             "field_load": f"0x{rva + resolve.start(3) - 3:X}",
                             "window_colors": search_grid_window_colors(
                                 image, rva, code, ranges, imports, vtable),
+                            "alternating_palette": search_grid_alternating_palette(
+                                rva, code, ranges, rva + resolve.end(), ranges[method]),
                         }
 
 

@@ -20,6 +20,12 @@ if /i "%~2"=="counter-probe" (
     set "THEME_DLL_NAME=search-counter-probe.dll"
     set "THEME_LAUNCHER_NAME=counter-probe-run.exe"
 )
+if /i "%~2"=="grid-probe" (
+    set "THEME_SOURCE=grid_identity_probe.cpp"
+    set "THEME_LAUNCHER_SOURCE=grid_probe_launcher.cpp"
+    set "THEME_DLL_NAME=grid-identity-probe.dll"
+    set "THEME_LAUNCHER_NAME=grid-probe-run.exe"
+)
 if /i "%~2"=="cairo" (
     set "THEME_SOURCE=cairo_experiment.cpp"
     set "THEME_LAUNCHER_FLAGS=/DTHEME_BENCHMARK"

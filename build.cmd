@@ -25,6 +25,10 @@ if /i "%~2"=="tooltip-trace" (
     set "THEME_DLL_FLAGS=/DTHEME_TOOLTIP_TRACE"
     set "THEME_LAUNCHER_FLAGS=/DTHEME_TOOLTIP_TRACE"
 )
+if /i "%~2"=="search-results-trace" (
+    set "THEME_SOURCE=search_results_trace.cpp"
+    set "THEME_LAUNCHER_FLAGS=/DTHEME_SEARCH_RESULTS_TRACE"
+)
 if /i "%~2"=="form-line-trace" (
     set "THEME_SOURCE=cairo_experiment.cpp"
     set "THEME_DLL_FLAGS=/DTHEME_FORM_LINE_TRACE"

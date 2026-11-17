@@ -7,6 +7,8 @@
 #include "outline_trace.hpp"
 #elif defined(THEME_GRID_TRACE)
 #include "grid_trace.hpp"
+#elif defined(THEME_SEARCH_RESULTS_TRACE)
+#include "search_results_trace.hpp"
 #endif
 
 #if defined(THEME_OUTLINE_TRACE) || defined(THEME_GRID_TRACE)
@@ -15,8 +17,8 @@
 #if defined(THEME_FORM_LINE_TRACE) || defined(THEME_SPREADSHEET_TRACE)
 #define THEME_DOCUMENT_TRACE
 #endif
-#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_DOCUMENT_TRACE)
-#define THEME_CAIRO_TRACE
+#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_DOCUMENT_TRACE) || defined(THEME_SEARCH_RESULTS_TRACE)
+#define THEME_HAS_TRACE
 #endif
 
 #include <tlhelp32.h>
@@ -123,9 +125,12 @@ constexpr char traceExport[] = "ReadOutlineTraceV2";
 #elif defined(THEME_GRID_TRACE)
 using TraceResult = GridTrace;
 constexpr char traceExport[] = "ReadGridTraceV4";
+#elif defined(THEME_SEARCH_RESULTS_TRACE)
+using TraceResult = SearchResultsTrace;
+constexpr char traceExport[] = "ReadSearchResultsTraceV1";
 #endif
 
-#ifdef THEME_CAIRO_TRACE
+#ifdef THEME_HAS_TRACE
 DWORD readTrace(HANDLE child, DWORD pid, const std::wstring& dll)
 {
     const auto base = remoteModule(pid, dll);
@@ -145,7 +150,13 @@ DWORD readTrace(HANDLE child, DWORD pid, const std::wstring& dll)
     VirtualFreeEx(child, output, 0, MEM_RELEASE);
     if (error) return error;
 
-#ifdef THEME_GRID_TRACE
+#ifdef THEME_SEARCH_RESULTS_TRACE
+    std::puts("Search grid property 4 (calls since previous read):");
+    std::printf("  Cached color: %lu\n  Original color: %lu\n  Unexpected color source: %lu\n"
+                "  Other grid class: %lu\n",
+                trace.cachedColorCalls, trace.originalColorCalls,
+                trace.unexpectedColorCalls, trace.otherGridCalls);
+#elif defined(THEME_GRID_TRACE)
     std::puts("Spreadsheet grid rectangles (x, y, width, height, calls since previous read):");
     for (const auto& sample : trace.rectangles) {
         const auto& rect = sample.rectangle;
@@ -188,7 +199,7 @@ DWORD readTrace(HANDLE child, DWORD pid, const std::wstring& dll)
         if (color.calls) std::printf("  #%08lX %lu\n", color.rgba, color.calls);
     }
 #endif
-#ifndef THEME_GRID_TRACE
+#if !defined(THEME_GRID_TRACE) && !defined(THEME_SEARCH_RESULTS_TRACE)
     std::printf("  Other calls: %lu\n", trace.otherCalls);
 #endif
 #ifdef THEME_SPREADSHEET_TRACE
@@ -396,6 +407,11 @@ int wmain(int argc, wchar_t** argv)
         std::fputs("Usage: tree-theme-run.exe <1cv8c.exe or 1cv8.exe> <server\\ref>\n", stderr);
         return 2;
     }
+#elif defined(THEME_SEARCH_RESULTS_TRACE)
+    if (argc != 3 || !serverRef(argv[2])) {
+        std::fputs("Usage: tree-theme-run.exe <1cv8.exe> <server\\ref>\n", stderr);
+        return 2;
+    }
 #endif
     const bool profileMode = argc == 5 && std::wstring_view(argv[3]) == L"--palette";
     ThemeProfile profile;
@@ -449,12 +465,14 @@ int wmain(int argc, wchar_t** argv)
         return 2;
     }
 
-#ifdef THEME_DOCUMENT_TRACE
+#if defined(THEME_DOCUMENT_TRACE) || defined(THEME_SEARCH_RESULTS_TRACE)
     ULONG_PTR traceRva{};
     if (themeExportRva(dll, traceExport, traceRva)) {
         std::fprintf(stderr, "The adjacent DLL lacks the %s export.\n", traceExport);
         return 2;
     }
+#endif
+#ifdef THEME_DOCUMENT_TRACE
     const wchar_t* mode = L" ENTERPRISE ";
 #ifdef THEME_SPREADSHEET_TRACE
     if (designer) mode = L" DESIGNER ";
@@ -474,12 +492,15 @@ int wmain(int argc, wchar_t** argv)
     const Handle child(process.hProcess);
     CloseHandle(process.hThread);
     if (profileMode) return applyLaunchProfile(child, process.dwProcessId, dll, profile);
-#ifdef THEME_CAIRO_TRACE
+#ifdef THEME_HAS_TRACE
 #ifdef THEME_SPREADSHEET_TRACE
     std::printf("Started %s PID %lu. Open the spreadsheet first.\n",
                 designer ? "Configurator" : "Enterprise", process.dwProcessId);
 #elif defined(THEME_FORM_LINE_TRACE)
     std::printf("Started Enterprise PID %lu. Open the target form first.\n", process.dwProcessId);
+#elif defined(THEME_SEARCH_RESULTS_TRACE)
+    std::printf("Started Configurator PID %lu. Enable the trace before running metadata search.\n",
+                process.dwProcessId);
 #else
     std::printf("Started Configurator PID %lu.\n", process.dwProcessId);
 #endif
@@ -497,7 +518,7 @@ int wmain(int argc, wchar_t** argv)
     for (char input[32]; std::fgets(input, sizeof(input), stdin); ) {
         const char action = input[0];
         if (action == 'q') break;
-#ifdef THEME_CAIRO_TRACE
+#ifdef THEME_HAS_TRACE
         if (action == 't') {
             const auto error = readTrace(child, process.dwProcessId, dll);
             if (error) std::fprintf(stderr, "Reading trace failed: %lu\n", error);
@@ -542,6 +563,8 @@ int wmain(int argc, wchar_t** argv)
         std::puts(action == 'e' ? "Spreadsheet outline trace enabled." : "Spreadsheet outline trace disabled.");
 #elif defined(THEME_GRID_TRACE)
         std::puts(action == 'e' ? "Spreadsheet grid trace enabled." : "Spreadsheet grid trace disabled.");
+#elif defined(THEME_SEARCH_RESULTS_TRACE)
+        std::puts(action == 'e' ? "Search results trace enabled." : "Search results trace disabled.");
 #else
         std::puts(action == 'e' ? "Theme enabled. Repaint the tree." :
                                   "Theme disabled. Repaint the tree.");

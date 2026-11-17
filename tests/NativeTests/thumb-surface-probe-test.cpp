@@ -107,12 +107,12 @@ struct Fixture {
         put(stack, ownerFrame + 0x90, wb + 0x1D5D9);
         put(stack, paintFrame + 0x70, ULONG_PTR{0x99000});
         put(stack, paintFrame - 0x30, ULONG_PTR{0x99000});
-        put(stack, 0x478, ULONG_PTR{0x99000});
+        put(stack, 0x648, ULONG_PTR{0x99000});
         put(stack, drawFrame + 0x78, ULONG_PTR{0x1234567}); // Read as VDC only in the stale research note.
         put(stack, drawFrame + 0x80, ptr(drawingObject) + 8);
-        put(stack, 0x468, ptr(drawingObject));
+        put(stack, 0x638, ptr(drawingObject));
         rasterInterface = iu + 0x13D08;
-        put(stack, 0x330, reinterpret_cast<ULONG_PTR>(&rasterInterface));
+        put(stack, 0x500, reinterpret_cast<ULONG_PTR>(&rasterInterface));
         put(stack, ownerFrame - 0x38, ptr(scroller));
         put(stack, ownerFrame - 0x40, layout);
         put(stack, ownerFrame - 0x20, static_cast<ULONG_PTR>(componentOffset));
@@ -202,9 +202,11 @@ void testRoutes(Fixture& f)
         f.expect(Stage::DelegatedDraw, "all shifted returns must match to count a confirmed chain");
         --f.stack[slot / 8];
     }
-    for (const size_t slot : {paintFrame + 0x70, paintFrame - 0x30, ULONG_PTR{0x478}}) {
+    for (const size_t slot : {paintFrame + 0x70, paintFrame - 0x30, ULONG_PTR{0x648}}) {
         f.route(); ++f.stack[slot / 8]; f.expect(Stage::Vdc, "VDC copies must match");
     }
+    f.route(); put(f.stack, 0x478, f.stack[0x648 / 8]); put(f.stack, 0x648, ULONG_PTR{0});
+    f.expect(Stage::Vdc, "VDC at the raster return's old offset cannot replace the AC50 saved RSI");
     f.route(); put(f.stack, paintFrame + 0xEA, BYTE{0}); f.expect(Stage::ThumbPresent, "absent thumb rejected");
     f.route(); put(f.stack, paintFrame + 0xD8, RECT{}); f.expect(Stage::Owner, "empty thumb geometry rejected");
     for (const size_t slot : {ownerFrame - 0x38, ownerFrame - 0x40, ownerFrame - 0x20, ownerFrame - 0x10,
@@ -216,14 +218,18 @@ void testRoutes(Fixture& f)
     f.route(); ++f.stack[(paintFrame - 0x18) / 8]; f.expect(Stage::Component, "component must be in owner slot");
     f.route(); ++(*f.wbase)[(0x3D348 + 0x38) / 8]; f.expect(Stage::Component, "thumb metrics dispatch must match");
     f.route(); put(f.component, 0xC, DWORD{6}); f.expect(Stage::Component, "hot ID limited to known values");
-    for (const size_t slot : {drawFrame + 0x80, ULONG_PTR{0x468}}) {
+    for (const size_t slot : {drawFrame + 0x80, ULONG_PTR{0x638}}) {
         f.route(); ++f.stack[slot / 8]; f.expect(Stage::Cache, "drawing interface and wrapper must match");
     }
-    f.route(); put(f.stack, 0x330, f.routes.imageUi + 0x13D08);
+    f.route(); put(f.stack, 0x468, f.stack[0x638 / 8]); put(f.stack, 0x638, ULONG_PTR{0});
+    f.expect(Stage::Cache, "drawing wrapper belongs to the AC50 frame");
+    f.route(); put(f.stack, 0x330, f.stack[0x500 / 8]); put(f.stack, 0x500, ULONG_PTR{0});
+    f.expect(Stage::Cache, "raster interface belongs to the AC50 frame");
+    f.route(); put(f.stack, 0x500, f.routes.imageUi + 0x13D08);
     f.expect(Stage::Cache, "raster table itself cannot stand in for its interface instance");
     f.route(); f.rasterInterface = f.routes.imageUi + 0x13D10; f.expect(Stage::Cache, "raster interface table must match");
-    f.route(); put(f.stack, 0x330, ULONG_PTR{0}); f.expect(Stage::Cache, "null raster interface rejected");
-    f.route(); put(f.stack, 0x330, ULONG_PTR{1}); f.expect(Stage::ReadFailure, "invalid raster interface rejected");
+    f.route(); put(f.stack, 0x500, ULONG_PTR{0}); f.expect(Stage::Cache, "null raster interface rejected");
+    f.route(); put(f.stack, 0x500, ULONG_PTR{1}); f.expect(Stage::ReadFailure, "invalid raster interface rejected");
     f.route(); put(f.component, 0x28, ULONG_PTR{0}); f.expect(Stage::Cache, "empty cache rejected");
     f.route(); f.expect(Stage::Accepted, "drawing wrapper may differ from component cache");
     f.route(); put(f.drawingObject, 8, f.routes.imageUi + 0x13EB0); f.expect(Stage::Cache, "unresized class rejected");

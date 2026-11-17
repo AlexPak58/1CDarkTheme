@@ -10,6 +10,7 @@ namespace thumb_surface_capture {
 using Stage = ThumbSurfaceStage;
 inline constexpr ULONGLONG snapshotWaitMs = 100;
 inline constexpr ULONG_PTR drawFrame = 0x730, paintFrame = 0x8A0, ownerFrame = 0x9F0;
+inline constexpr ULONG_PTR imageDrawFrame = 0x660; // imageui AC50 returns to 90AB.
 inline constexpr std::array<DWORD, 7> resizedReturns{0x19AF5,0x19B78,0x19BFD,0x19ED0,0x19FAD,0x1A030,0x1A0B5};
 
 struct Images { ULONG_PTR frame{}, graphics{}, wbase{}, imageUi{}; };
@@ -58,7 +59,7 @@ inline Stage locatePaint(ULONG_PTR h, const Images& b, ThumbSurfaceIdentity& id)
     ULONG_PTR value{};
     if (!r.stack(h, 0, value)) return Stage::ReadFailure;
     if (value != b.graphics + 0x13482) return Stage::OtherCall;
-    const ULONG_PTR offsets[]{0x260, 0x360, 0x420, 0x490, 0x660};
+    const ULONG_PTR offsets[]{0x260, 0x360, 0x420, 0x490, imageDrawFrame};
     const ULONG_PTR returns[]{b.graphics + 0xAE2A2, b.graphics + 0xB6B09, b.imageUi + 0x63BB,
                               b.imageUi + 0xAE67, b.imageUi + 0x90AB};
     for (size_t i = 0; i < std::size(offsets); ++i) {
@@ -80,11 +81,12 @@ inline Stage locatePaint(ULONG_PTR h, const Images& b, ThumbSurfaceIdentity& id)
         if (value != b.wbase + outerReturns[i]) return outerRejections[i];
     }
 
-    // F+78 is a reused coordinates temporary. These three VDC copies are
-    // preserved along the matched imageui and wbase frames.
+    // F+78 is a reused coordinates temporary. The saved imageui VDC (RSI)
+    // belongs to AC50, whose return is at H+660. H+490 is its raster callee's
+    // return, so reading H+490-18 would inspect an unrelated flag.
     ULONG_PTR vdc{}, savedVdc{}, imageVdc{};
     if (!r.stack(h, paintFrame + 0x70, vdc) || !r.stack(h, paintFrame - 0x30, savedVdc) ||
-        !r.stack(h, 0x478, imageVdc)) return Stage::ReadFailure;
+        !r.stack(h, imageDrawFrame - 0x18, imageVdc)) return Stage::ReadFailure;
     if (!vdc || vdc != savedVdc || vdc != imageVdc) return Stage::Vdc;
 
     ULONG_PTR scroller{}, layout{}, offset{}, slot{}, rect{}, config{};
@@ -128,7 +130,8 @@ inline Stage locatePaint(ULONG_PTR h, const Images& b, ThumbSurfaceIdentity& id)
 
     ULONG_PTR cached{}, qi{}, drawingObject{}, rasterQi{}, rasterTable{}, qiTable{}, drawMethod{}, rasterMethod{};
     if (!r.read(component, 0x28, cached) || !r.stack(h, drawFrame + 0x80, qi) ||
-        !r.stack(h, 0x468, drawingObject) || !r.stack(h, 0x330, rasterQi)) return Stage::ReadFailure;
+        !r.stack(h, imageDrawFrame - 0x28, drawingObject) || !r.stack(h, imageDrawFrame - 0x160, rasterQi))
+        return Stage::ReadFailure;
     // The resolved imageui drawing interface is at +8 in its wrapper. The
     // component's image.dll cache and the converted Cairo surface can be separate objects.
     if (!cached || qi <= 8 || drawingObject != qi - 8 || !rasterQi) return Stage::Cache;

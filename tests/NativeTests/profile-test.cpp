@@ -73,10 +73,11 @@ int main(int argc, char** argv)
     check(argc == 2, "expected process mode");
     installationResult = ERROR_SUCCESS;  // Bypass production code patching in this standalone test.
     ThemeProfile profile;
-    check(profile.version == 8 && profile.size == 160 && profile.zones == 32511 &&
-          panelBorder == 35 && dockSplitterFill == 36 && paletteColorCount == 37 &&
+    check(profile.version == 9 && profile.size == 168 && profile.zones == 65279 &&
+          panelBorder == 35 && dockSplitterFill == 36 && scrollerCornerBackground == 37 && scrollerCornerBorder == 38 && paletteColorCount == 39 &&
           profile.colors[panelHeaderBackground] == 0x1F2938 && profile.colors[panelHeaderText] == 0xE5EBF5 &&
-          profile.colors[panelBorder] == 0x3B4758 && profile.colors[dockSplitterFill] == 0x3B4758,
+          profile.colors[panelBorder] == 0x3B4758 && profile.colors[dockSplitterFill] == 0x3B4758 &&
+          profile.colors[scrollerCornerBackground] == 0x1F2938 && profile.colors[scrollerCornerBorder] == 0x3B4758,
           "native defaults include panel headers, border and dock splitters");
     profile.zones = enableSearchResults;
     if (std::strcmp(argv[1], "DESIGNER") != 0) {
@@ -165,7 +166,7 @@ int main(int argc, char** argv)
     check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject incompatible profile version");
     profile.version = themeProfileVersion;
     profile.size -= static_cast<DWORD>(sizeof(DWORD));
-    check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject v8 profile with v7 size");
+    check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject v9 profile with truncated size");
     profile.size = static_cast<DWORD>(sizeof(profile));
     profile.colors[panelBorder] = 0x01000000;
     check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER && activeProfile.load()->zones == 0,

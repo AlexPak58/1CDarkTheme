@@ -5,6 +5,32 @@
 namespace {
 bool denyRestore{};
 bool failFlush{};
+bool useModuleFixture{};
+bool hasWbase{};
+bool checkedWbaseHash{};
+const auto moduleFixture = reinterpret_cast<HMODULE>(ULONG_PTR{0x10000});
+const auto wbaseFixture = reinterpret_cast<HMODULE>(ULONG_PTR{0x20000});
+
+HMODULE WINAPI fixtureModule(LPCWSTR name)
+{
+    if (!useModuleFixture) return GetModuleHandleW(name);
+    if (name && std::wstring_view(name) == L"wbase83.dll") return hasWbase ? wbaseFixture : nullptr;
+    return moduleFixture;
+}
+
+std::wstring fixturePath(HMODULE module)
+{
+    if (!useModuleFixture) return modulePath(module);
+    return module == wbaseFixture ? L"wbase83-fixture" : L"admitted-fixture";
+}
+
+bool fixtureHash(const std::wstring& path, const wchar_t* expected)
+{
+    if (!useModuleFixture) return matchesSha256(path, expected);
+    if (path != L"wbase83-fixture") return true;
+    checkedWbaseHash = std::wstring_view(expected) == L"8BC18B9428A1FCFABD77FB1D30D660860434B9F8F1586DFF0387E396F7DA53DE";
+    return false;
+}
 
 BOOL WINAPI fixtureProtect(LPVOID address, SIZE_T size, DWORD protection, PDWORD previous)
 {
@@ -28,7 +54,13 @@ BOOL WINAPI fixtureFlush(HANDLE process, LPCVOID address, SIZE_T size)
 
 #define VirtualProtect fixtureProtect
 #define FlushInstructionCache fixtureFlush
+#define GetModuleHandleW fixtureModule
+#define modulePath fixturePath
+#define matchesSha256 fixtureHash
 #include "theme.cpp"
+#undef matchesSha256
+#undef modulePath
+#undef GetModuleHandleW
 #undef VirtualProtect
 #undef FlushInstructionCache
 
@@ -42,6 +74,14 @@ void check(bool ok, const char* details)
 
 int main()
 {
+    useModuleFixture = true;
+    check(installSites() == ERROR_MOD_NOT_FOUND && !checkedWbaseHash && !sites[0].address,
+          "absent wbase declines installation before any patch");
+    hasWbase = true;
+    check(installSites() == ERROR_REVISION_MISMATCH && checkedWbaseHash && !sites[0].address,
+          "mismatched wbase hash declines installation before any patch");
+    useModuleFixture = false;
+
     auto* page = static_cast<BYTE*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     check(page != nullptr, "allocate synthetic patch page");
     for (size_t i = 0; i < installedSiteCount; ++i) {

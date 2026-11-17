@@ -32,10 +32,10 @@ int wmain(int argc, wchar_t** argv)
         return input;
     };
     ThemeProfile profile;
-    check(parseProfile(palette(themeZoneMask, 37), profile) && profile.zones == themeZoneMask &&
-          profile.colors[dockSplitterFill] == 0xABCDEF, "parse v8 dock splitter independently of zone mask");
-    constexpr DWORD legacyMasks[] = {511, 1023, 2047, 4095, 8191, 16383, 16383};
-    constexpr size_t legacyCounts[] = {25, 29, 30, 31, 33, 35, 36};
+    check(parseProfile(palette(themeZoneMask, 39), profile) && profile.zones == themeZoneMask &&
+          profile.colors[scrollerCornerBackground] == 0xABCDEF && profile.colors[scrollerCornerBorder] == 0xABCDEF, "parse v9 corner independently of zone mask");
+    constexpr DWORD legacyMasks[] = {511, 1023, 2047, 4095, 8191, 16383, 16383, 32767};
+    constexpr size_t legacyCounts[] = {25, 29, 30, 31, 33, 35, 36, 37};
     const ThemeProfile defaults;
     for (size_t i = 0; i < std::size(legacyCounts); ++i) {
         const auto count = legacyCounts[i];
@@ -51,6 +51,25 @@ int wmain(int argc, wchar_t** argv)
     check(!parseProfile(palette(0, 34), profile) && !parseProfile(palette(0, 38), profile),
           "unexpected color counts refused");
     check(!parseProfile(palette(8192, 35) + L",GGGGGG", profile), "invalid v7 border refused");
+
+    AttachModules admission;
+    admission.frame = L"frame";
+    admission.graphics = L"graphics";
+    admission.frontend = L"frontend";
+    unsigned hashes{};
+    bool admitWbase{};
+    const auto hashFixture = [&](const std::wstring& path, const wchar_t* expected) {
+        ++hashes;
+        return path != L"wbase" || (admitWbase && std::wstring_view(expected) == wbaseHash);
+    };
+    check(validateAttachModules(admission, hashFixture) == ERROR_MOD_NOT_FOUND && hashes == 0,
+          "missing wbase refused before any remote load or hash check");
+    admission.wbase = L"wbase";
+    check(validateAttachModules(admission, hashFixture) == ERROR_REVISION_MISMATCH && hashes == 4,
+          "wbase mismatch refused in preflight");
+    admitWbase = true;
+    check(validateAttachModules(admission, hashFixture) == ERROR_SUCCESS && hashes == 8,
+          "all four admitted module hashes permit attachment");
 
     const auto pid = GetCurrentProcessId();
     FILETIME created{}, exited{}, kernel{}, user{};
@@ -94,8 +113,8 @@ int wmain(int argc, wchar_t** argv)
     const HMODULE loaded = LoadLibraryW(imagePath.c_str());
     check(loaded != nullptr, "load production fixture only into this test process");
     AttachImage image(imagePath);
-    check(image.validate() && GetProcAddress(loaded, "ThemeProfileAttachV8"),
-          "production image has v8 attach ABI and executable setter");
+    check(image.validate() && GetProcAddress(loaded, "ThemeProfileAttachV9"),
+          "production image has v9 attach ABI and executable setter");
     AttachModules modules;
     check(snapshotAttachModules(pid, imagePath, modules) == ERROR_SUCCESS &&
           modules.ownBase == reinterpret_cast<ULONG_PTR>(loaded) && !modules.competingDll, "matching mapped path");

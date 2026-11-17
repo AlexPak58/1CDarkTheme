@@ -263,6 +263,7 @@ bool parseProfile(std::wstring_view input, ThemeProfile& profile)
     if ((input.size() + 1) % 7 != 0) return false;
     const size_t colorCount = (input.size() + 1) / 7;
     if (colorCount != paletteColorCount &&
+        !(colorCount == scrollerCornerBackground && zones < enableScrollerCorner) &&
         !(colorCount == dockSplitterFill && zones < enableDockSplitter) &&
         !(colorCount == panelBorder && zones < enableDockSplitter) &&
         !(colorCount == panelHeaderBackground && zones < enablePanelHeaders) &&
@@ -469,7 +470,19 @@ struct AttachModules {
     std::wstring frame;
     std::wstring graphics;
     std::wstring frontend;
+    std::wstring wbase;
 };
+
+template<typename HashCheck>
+DWORD validateAttachModules(const AttachModules& modules, HashCheck matches)
+{
+    if (modules.frame.empty() || modules.graphics.empty() || modules.frontend.empty() || modules.wbase.empty())
+        return ERROR_MOD_NOT_FOUND;
+    if (!matches(modules.frame, frameHash) || !matches(modules.graphics, graphicsHash) ||
+        !matches(modules.frontend, listFrontendHash) || !matches(modules.wbase, wbaseHash))
+        return ERROR_REVISION_MISMATCH;
+    return ERROR_SUCCESS;
+}
 
 DWORD snapshotAttachModules(DWORD pid, const std::wstring& dll, AttachModules& modules,
                             const wchar_t* moduleName = L"tree-theme.dll")
@@ -494,6 +507,8 @@ DWORD snapshotAttachModules(DWORD pid, const std::wstring& dll, AttachModules& m
             modules.graphics = item.szExePath;
         } else if (pathEqual(L"frntend.dll", item.szModule)) {
             modules.frontend = item.szExePath;
+        } else if (pathEqual(L"wbase83.dll", item.szModule)) {
+            modules.wbase = item.szExePath;
         }
     } while (Module32NextW(snapshot, &item));
     const auto error = GetLastError();
@@ -646,11 +661,9 @@ int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile)
     if (const auto error = snapshotAttachModules(pid, dll, modules)) return attachError(process, creation, error);
     if (modules.competingDll) return attachResult(AttachStatus::Conflict, ERROR_ALREADY_EXISTS);
     if (!profile.zones && !modules.ownBase) return attachResult(AttachStatus::Disabled);
-    if (modules.frame.empty() || modules.graphics.empty() || modules.frontend.empty())
-        return attachError(process, creation, ERROR_MOD_NOT_FOUND);
-    if (!matchesSha256(modules.frame, frameHash) || !matchesSha256(modules.graphics, graphicsHash) ||
-        !matchesSha256(modules.frontend, listFrontendHash))
-        return attachResult(AttachStatus::Unsupported, ERROR_REVISION_MISMATCH);
+    if (const auto error = validateAttachModules(modules, matchesSha256))
+        return error == ERROR_REVISION_MISMATCH ? attachResult(AttachStatus::Unsupported, error) :
+                                               attachError(process, creation, error);
     if (const auto error = checkProcessLifetime(process, creation)) return attachError(process, creation, error);
     if (profile.zones && !findDesignerMainWindow(pid).window)
         return attachResult(AttachStatus::NotReady, ERROR_NOT_READY);
@@ -797,8 +810,8 @@ int wmain(int argc, wchar_t** argv)
     const bool profileMode = argc == 5 && std::wstring_view(argv[3]) == L"--palette";
     ThemeProfile profile;
     if (profileMode && !parseProfile(argv[4], profile)) {
-        std::fputs("Invalid palette. Expected a zone mask and 37 six-digit RGB colors "
-                   "(25, 29, 30, 31, 33, 35 or 36 for legacy palettes).\n", stderr);
+        std::fputs("Invalid palette. Expected a zone mask and 39 six-digit RGB colors "
+                   "(25, 29, 30, 31, 33, 35, 36 or 37 for legacy palettes).\n", stderr);
         return 2;
     }
     ULONG_PTR selection{};

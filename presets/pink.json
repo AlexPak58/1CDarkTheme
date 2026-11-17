@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "name": "Нежно-розовая",
-  "paletteVersion": 8,
-  "mask": 32511,
+  "paletteVersion": 9,
+  "mask": 65279,
   "colors": [
     "#FFF4F7",
     "#523044",
@@ -40,6 +40,8 @@
     "#F8E1E9",
     "#3C2433",
     "#B87999",
-    "#D9ADBF"
+    "#D9ADBF",
+    "#F9E7EE",
+    "#B87999"
   ]
 }

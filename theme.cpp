@@ -4,6 +4,7 @@
 #include "devtool_binding.hpp"
 #include "panel_headers.hpp"
 #include "dock_splitters.hpp"
+#include "scroller_corner.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -79,6 +80,7 @@ constexpr size_t installedSiteCount = std::size(sites);
 ULONG_PTR frameBase;
 ULONG_PTR graphicsBase;
 ULONG_PTR frontendBase;
+ULONG_PTR wbaseBase;
 SRWLOCK installationLock = SRWLOCK_INIT;
 constexpr ThemeProfile defaultProfile{};
 constexpr ThemeProfile disabledProfile{sizeof(ThemeProfile), themeProfileVersion, 0};
@@ -371,7 +373,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     } else if (event.ExceptionAddress == sites[emptyFill].address) {
         // CMOVNE selects the low 32 bits and clears the high 32 bits.
         regs.Rdx = static_cast<DWORD>((regs.EFlags & 0x40) == 0 ? regs.Rax : regs.Rdx);
-        bool dockMatched = false;
+        bool paletteFillMatched = false;
         if (withLists && static_cast<DWORD>(regs.Rdx) == white &&
             callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
             callerAt(regs, 0x148) == frameBase + 0xA4638) {
@@ -384,7 +386,12 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
                    regs.Rdx == barBackgroundBgr &&
                    dock_detail::matches(regs, frameBase, graphicsBase)) {
             regs.Rdx = toBgr(colors.colors[dockSplitterFill]);
-            dockMatched = true;
+            paletteFillMatched = true;
+        } else if ((theme & enableScrollerCorner) != 0 && (regs.EFlags & 0x40) == 0 &&
+                   regs.Rdx == scroller_corner::platformFillBgr &&
+                   scroller_corner::matches(regs, frameBase, graphicsBase, wbaseBase, scroller_corner::Paint::Fill)) {
+            regs.Rdx = toBgr(colors.colors[scrollerCornerBackground]);
+            paletteFillMatched = true;
         } else if ((theme & enableToolbarBand) != 0 && (regs.EFlags & 0x40) == 0 &&
                    regs.Rdx == barBackgroundBgr &&
                    callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
@@ -425,7 +432,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         } else if (withProperties && (regs.EFlags & 0x40) == 0) {
             regs.Rdx = propertyFillColor(regs, static_cast<DWORD>(regs.Rdx), colors);
         }
-        if (!dockMatched && withPopupMenu && (regs.EFlags & 0x40) == 0 &&
+        if (!paletteFillMatched && withPopupMenu && (regs.EFlags & 0x40) == 0 &&
             (regs.Rdx == platformPopupMenuBackgroundBgr || regs.Rdx == platformPopupMenuGutterBgr))
             regs.Rdx = popupMenuFillColor(regs, static_cast<DWORD>(regs.Rdx), colors);
     } else if (event.ExceptionAddress == sites[labelColor].address) {
@@ -492,6 +499,9 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
             callerAt(regs, 0xF8) == frameBase + 0x8BD1BF &&
             callerAt(regs, 0x1B8) == frameBase + 0x8BB658;
         regs.Rdx = toolbarEdge ? toBgr(colors.colors[toolbarBorder]) : original;
+        if ((theme & enableScrollerCorner) != 0 && original == scroller_corner::platformStrokeBgr &&
+            scroller_corner::matches(regs, frameBase, graphicsBase, wbaseBase, scroller_corner::Paint::Stroke))
+            regs.Rdx = toBgr(colors.colors[scrollerCornerBorder]);
         length = sites[toolbarEdgeStroke].length;
     } else {
         size_t site = dockFrameFill;
@@ -522,15 +532,18 @@ DWORD installSites()
     const auto frame = GetModuleHandleW(L"frame.dll");
     const auto graphics = GetModuleHandleW(L"grphcs.dll");
     const auto frontend = GetModuleHandleW(L"frntend.dll");
-    if (!frame || !graphics || !frontend) return ERROR_MOD_NOT_FOUND;
+    const auto wbase = GetModuleHandleW(L"wbase83.dll");
+    if (!frame || !graphics || !frontend || !wbase) return ERROR_MOD_NOT_FOUND;
     if (IsDebuggerPresent() || !matchesSha256(modulePath(nullptr), exeHash) ||
         !matchesSha256(modulePath(frame), frameHash) ||
         !matchesSha256(modulePath(graphics), graphicsHash) ||
-        !matchesSha256(modulePath(frontend), listFrontendHash)) return ERROR_REVISION_MISMATCH;
+        !matchesSha256(modulePath(frontend), listFrontendHash) ||
+        !matchesSha256(modulePath(wbase), wbaseHash)) return ERROR_REVISION_MISMATCH;
 
     frameBase = reinterpret_cast<ULONG_PTR>(frame);
     graphicsBase = reinterpret_cast<ULONG_PTR>(graphics);
     frontendBase = reinterpret_cast<ULONG_PTR>(frontend);
+    wbaseBase = reinterpret_cast<ULONG_PTR>(wbase);
     sites[rowFill].address = reinterpret_cast<BYTE*>(frameBase + 0x303454);
     sites[emptyFill].address = reinterpret_cast<BYTE*>(graphicsBase + 0xAEE4E);
     sites[labelColor].address = reinterpret_cast<BYTE*>(graphicsBase + 0x22D7);
@@ -553,6 +566,7 @@ DWORD installSites()
         reinterpret_cast<LPCWSTR>(frame),
         reinterpret_cast<LPCWSTR>(graphics),
         reinterpret_cast<LPCWSTR>(frontend),
+        reinterpret_cast<LPCWSTR>(wbase),
     };
     constexpr auto flags = GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
     for (const auto& module : modules) {
@@ -690,7 +704,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
 }
 
 #ifndef THEME_BACKGROUND_ONLY
-extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV8(LPVOID)
+extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV9(LPVOID)
 {
     return themeProfileVersion;
 }

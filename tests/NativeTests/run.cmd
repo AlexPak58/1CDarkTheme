@@ -39,7 +39,7 @@ call "%CD%\build.cmd" "%OUT%\property" property-probe
 if errorlevel 1 goto failed
 call "%CD%\build.cmd" "%OUT%\property-paint" property-paint-probe
 if errorlevel 1 goto failed
-for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test devtool-binding-test global-search-test frame-probe-test frame-launcher-test panel-headers-test scroller-probe-test scroller-launcher-test dock-probe-test dock-launcher-test dock-splitters-test property-probe-test property-launcher-test property-paint-probe-test property-paint-launcher-test) do (
+for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test devtool-binding-test global-search-test frame-probe-test frame-launcher-test panel-headers-test scroller-probe-test scroller-launcher-test scroller-corner-test dock-probe-test dock-launcher-test dock-splitters-test property-probe-test property-launcher-test property-paint-probe-test property-paint-launcher-test) do (
     cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /I. "%~dp0%%T.cpp" /Fo"%OUT%\%%T.obj" /Fe"%OUT%\%%T.exe" /link bcrypt.lib dwmapi.lib user32.lib
     if errorlevel 1 goto failed
 )
@@ -76,6 +76,8 @@ if errorlevel 1 goto failed
 "%OUT%\frame-launcher-test.exe" "%OUT%\frame\local-frame-probe.dll" "%OUT%\grid\grid-identity-probe.dll" "%OUT%\normal\tree-theme.dll"
 if errorlevel 1 goto failed
 "%OUT%\scroller-probe-test.exe"
+if errorlevel 1 goto failed
+"%OUT%\scroller-corner-test.exe"
 if errorlevel 1 goto failed
 "%OUT%\scroller-launcher-test.exe" "%OUT%\scroller\scroller-identity-probe.dll" "%OUT%\frame\local-frame-probe.dll" "%OUT%\normal\tree-theme.dll"
 if errorlevel 1 goto failed

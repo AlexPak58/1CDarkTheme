@@ -85,13 +85,15 @@ Check(requests.Count == 1 && changes == 1, "Unchanged successful profile is neit
 
 var updatedDark = dark with { Colors = [..dark.Colors] };
 updatedDark.Colors[36] = "#124578";
+updatedDark.Colors[37] = "#112244";
+updatedDark.Colors[38] = "#667799";
 PresetFile.Save(defaultPath, updatedDark);
 await monitor.PollOnceAsync();
 var splitterProfile = requests[^1].Item2;
 Check(requests.Count == 2 && requests[^1].Item1 == designer.Identity &&
-    splitterProfile.StartsWith("32511:", StringComparison.Ordinal) &&
-    splitterProfile.Split(',').Length == 37 && splitterProfile.EndsWith(",124578", StringComparison.Ordinal),
-    "Changed splitter color at the same path reapplies");
+    splitterProfile.StartsWith("65279:", StringComparison.Ordinal) &&
+    splitterProfile.Split(',').Length == 39 && splitterProfile.EndsWith(",124578,112244,667799", StringComparison.Ordinal),
+    "Changed splitter and corner colors at the same path reapply");
 
 config = config with { Rules = [new(null, platform, "Designer", "override.json")] };
 ThemeConfiguration.Save(configPath, config);

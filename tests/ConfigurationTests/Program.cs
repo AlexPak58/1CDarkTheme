@@ -41,7 +41,7 @@ for (var i = 0; i < shippedNames.Length; i++)
     Check(file.Preset.Mask == (i == 3 ? 0 : 130815), "packaged scroller zone default");
     using var packaged = JsonDocument.Parse(File.ReadAllText(packagePath));
     Check(packaged.RootElement.GetProperty("schemaVersion").GetInt32() == 1 &&
-          packaged.RootElement.GetProperty("paletteVersion").GetInt32() == 10, "packaged v10 profile");
+          packaged.RootElement.GetProperty("paletteVersion").GetInt32() == 11, "packaged v11 profile");
 }
 
 var dark = Palette.BuiltIns[0];
@@ -61,7 +61,17 @@ Check(scrollerZone.Label == "Дорожки и стрелки прокрутки
       scrollerZone.Fields.SequenceEqual(["Фон дорожки", "Фон кнопок", "Стрелки", "Кнопки при наведении", "Нажатые кнопки"]) &&
       scrollerZone.Hint is { Length: > 0 }, "scroller track and arrow editor fields");
 string[] scrollerDefaults = ["#1F2938", "#2A374A", "#E5EBF5", "#3B4A60", "#305A8A"];
-Check(dark.Colors[39..].SequenceEqual(scrollerDefaults), "dark scroller defaults");
+Check(dark.Colors[39..44].SequenceEqual(scrollerDefaults), "dark scroller defaults");
+string[] thumbDefaults = ["#61728A", "#263244", "#8093AC", "#A4BAD4"];
+Check(Palette.Version == 11 && Palette.ColorCount == 48 && Palette.AllZones == 262143,
+      "v11 palette shape");
+var thumbZone = Palette.Zones.Single(zone => zone.Bit == Palette.ScrollerThumb);
+Check(thumbZone.Label == "Бегунки прокрутки (эксперимент)" && thumbZone.Offset == 44 &&
+      thumbZone.Fields.SequenceEqual(["Фон бегунка", "Детали", "При наведении", "При нажатии"]) &&
+      Palette.ScrollerThumbDetail == 45 && Palette.ScrollerThumbHover == 46 && Palette.ScrollerThumbPressed == 47,
+      "separate thumb editor fields and ABI offsets");
+Check(dark.Colors[44..].SequenceEqual(thumbDefaults) &&
+      Palette.BuiltIns.All(p => (p.Mask & Palette.ScrollerThumb) == 0), "thumb colors are opt-in");
 var firstPath = Path.Combine(run, "presets", "first.json");
 var secondPath = Path.Combine(run, "presets", "second.json");
 var firstHash = PresetFile.Save(firstPath, dark, "");
@@ -83,12 +93,12 @@ var second = PresetFile.Load(secondPath);
 Check(first.Hash == firstHash && second.Hash == secondHash && first.Hash != second.Hash, "round-trip hashes");
 Check(first.Preset.Name == second.Preset.Name && first.Preset.Colors[33] != second.Preset.Colors[33], "same display name");
 var cli = Palette.Encode(second.Preset.Mask, second.Preset.Colors);
-Check(cli.StartsWith("130815:") && cli.Split(',').Length == 44 &&
-      cli.EndsWith(",1122CC,99FF00,3A4B5C,558AC3,123456,ABCDEF,293A4B,647586,A8B9CA,204162,6480A2"),
+Check(cli.StartsWith("130815:") && cli.Split(',').Length == 48 &&
+      cli.EndsWith(",1122CC,99FF00,3A4B5C,558AC3,123456,ABCDEF,293A4B,647586,A8B9CA,204162,6480A2,61728A,263244,8093AC,A4BAD4"),
       "normalized panel and scrolling colors and default mask are sent to CLI");
 using (var saved = JsonDocument.Parse(File.ReadAllText(secondPath)))
     Check(saved.RootElement.GetProperty("schemaVersion").GetInt32() == 1 &&
-          saved.RootElement.GetProperty("paletteVersion").GetInt32() == 10, "saved v10 profile");
+          saved.RootElement.GetProperty("paletteVersion").GetInt32() == 11, "saved v11 profile");
 foreach (var mask in new[] { 0, 16384, 32767 })
 {
     var splitterPath = Path.Combine(run, $"splitter-{mask}.json");
@@ -112,9 +122,18 @@ foreach (var mask in new[] { 0, 65536, 131071 })
     var scrollerPath = Path.Combine(run, $"scroller-{mask}.json");
     PresetFile.Save(scrollerPath, edited with { Mask = mask });
     var scroller = PresetFile.Load(scrollerPath).Preset;
-    Check(scroller.Mask == mask && scroller.Colors[39..].SequenceEqual(["#293A4B", "#647586", "#A8B9CA", "#204162", "#6480A2"]) &&
+    Check(scroller.Mask == mask && scroller.Colors[39..44].SequenceEqual(["#293A4B", "#647586", "#A8B9CA", "#204162", "#6480A2"]) &&
           scroller.Colors.Take(39).SequenceEqual(second.Preset.Colors.Take(39)),
           $"scroller edits preserve the earlier palette with mask {mask}");
+}
+foreach (var mask in new[] { 0, Palette.ScrollerThumb, Palette.AllZones })
+{
+    var thumbPath = Path.Combine(run, $"thumb-{mask}.json");
+    var thumbEdited = edited with { Mask = mask, Colors = [..edited.Colors[..44], "#112233", "#445566", "#778899", "#AABBCC"] };
+    PresetFile.Save(thumbPath, thumbEdited);
+    var thumb = PresetFile.Load(thumbPath).Preset;
+    Check(thumb.Mask == mask && thumb.Colors.SequenceEqual(thumbEdited.Colors.Select(c => c.Trim().StartsWith('#') ? c.Trim().ToUpperInvariant() : "#" + c.Trim().ToUpperInvariant())),
+          $"explicit thumb colors preserve every earlier color with mask {mask}");
 }
 Reject<IOException>(() => PresetFile.Save(firstPath, edited, secondHash));
 Reject<IOException>(() => PresetFile.Save(firstPath, edited, ""));
@@ -142,7 +161,7 @@ Check(PresetFile.Load(firstPath).Hash == replaced, "oversized output retained fi
 Reject<JsonException>(() => PresetFile.Parse("{invalid"));
 Reject<JsonException>(() => PresetFile.Parse("""{"schemaVersion":1,"schemaVersion":1}"""));
 Reject<JsonException>(() => PresetFile.Parse("""{"schemaVersion":1,"name":"X","paletteVersion":7,"colors":[]}"""));
-Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Mask = 131072 }));
+Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Mask = 262144 }));
 Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Colors = dark.Colors[..^1] }));
 Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Colors = [..dark.Colors, "#AABBCC"] }));
 Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Colors = [..dark.Colors[..^1], "zzzzzz"] }));
@@ -150,7 +169,7 @@ Reject<InvalidDataException>(() => PresetFile.Save(firstPath, dark with { Colors
 string[] LegacyColors(int count) => Enumerable.Range(0, count).Select(i => $"#{0xA10000 + i:X6}").ToArray();
 foreach (var (version, count, mask) in new[]
     { (1, 25, 511), (2, 29, 1023), (3, 30, 2047), (4, 31, 4095), (5, 33, 8191), (6, 35, 16383),
-      (7, 36, 16383), (8, 37, 32767), (9, 39, 65535) })
+      (7, 36, 16383), (8, 37, 32767), (9, 39, 65535), (10, 44, 131071) })
 {
     var colors = LegacyColors(count);
     string Json(int selectedMask, int colorCount) => JsonSerializer.Serialize(new
@@ -159,7 +178,7 @@ foreach (var (version, count, mask) in new[]
         colors = LegacyColors(colorCount).Select(c => c[1..].ToLowerInvariant())
     });
     var migrated = PresetFile.Parse(Json(mask, count));
-    Check(migrated.Mask == mask && migrated.Colors.Length == 44 &&
+    Check(migrated.Mask == mask && migrated.Colors.Length == 48 &&
           migrated.Colors.Take(count).SequenceEqual(colors) &&
           migrated.Colors.Skip(count).SequenceEqual(dark.Colors.Skip(count)), $"v{version} legacy normalization");
     Check(PresetFile.Parse(Json(0, count)).Mask == 0, "legacy native colors do not enable zones");
@@ -167,22 +186,23 @@ foreach (var (version, count, mask) in new[]
     Reject<InvalidDataException>(() => PresetFile.Parse(Json(mask, count + 1)));
 }
 var legacyStore = new PresetStore();
-foreach (var (version, mask, colors, appended) in new[]
+foreach (var version in Enumerable.Range(1, 10))
 {
-    (5, 7935, LegacyColors(33), new[] { "#1F2938", "#E5EBF5", "#3B4758", "#3B4758", "#1F2938", "#3B4758" }),
-    (6, 8192, LegacyColors(35), new[] { "#3B4758", "#3B4758", "#1F2938", "#3B4758" }),
-    (7, 0x2241, LegacyColors(36), new[] { "#3B4758", "#1F2938", "#3B4758" }),
-    (8, 0x6241, LegacyColors(37), new[] { "#1F2938", "#3B4758" }),
-    (9, 0xE241, LegacyColors(39), Array.Empty<string>())
-})
-{
-    File.WriteAllText(legacyStore.Path, JsonSerializer.Serialize(new
+    var (maxMask, count) = Palette.Shape(version);
+    var colors = LegacyColors(count);
+    foreach (var mask in new[] { 0, maxMask / 3, maxMask })
     {
-        Version = version, Presets = new[] { new Preset("Сохранённая", mask, colors) }
-    }));
-    var stored = legacyStore.Load().Single();
-    Check(stored.Mask == mask && stored.Colors.SequenceEqual(colors.Concat(appended).Concat(scrollerDefaults)),
-          $"v{version} collection keeps mask and appends defaults");
+        var original = JsonSerializer.Serialize(new
+        {
+            Version = version, Presets = new[] { new Preset("Сохранённая", mask, colors) }
+        });
+        File.WriteAllText(legacyStore.Path, original);
+        var stored = legacyStore.Load().Single();
+        Check(stored.Mask == mask && stored.Colors.Take(count).SequenceEqual(colors) &&
+              stored.Colors.Skip(count).SequenceEqual(dark.Colors.Skip(count)) &&
+              (stored.Mask & Palette.ScrollerThumb) == 0 && File.ReadAllText(legacyStore.Path) == original,
+              $"v{version} collection preserves mask, existing colors and source file");
+    }
 }
 
 var baseline = ThemeConfiguration.CreateDefault(configPath);

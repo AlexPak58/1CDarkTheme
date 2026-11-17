@@ -26,8 +26,9 @@ inline constexpr ULONG_PTR enablePanelHeaders = 8192;
 inline constexpr ULONG_PTR enableDockSplitter = 16384;
 inline constexpr ULONG_PTR enableScrollerCorner = 32768;
 inline constexpr ULONG_PTR enableScrollerPng = 65536;
-inline constexpr DWORD themeZoneMask = 131071;
-inline constexpr DWORD themeProfileVersion = 10;
+inline constexpr ULONG_PTR enableScrollerThumb = 131072;
+inline constexpr DWORD themeZoneMask = 262143;
+inline constexpr DWORD themeProfileVersion = 11;
 
 enum PaletteColor : size_t {
     treeBackground, treeText, captionBackground, captionText,
@@ -44,6 +45,7 @@ enum PaletteColor : size_t {
     scrollerCornerBackground, scrollerCornerBorder,
     scrollerTrackBackground, scrollerArrowBackground, scrollerArrowGlyph,
     scrollerArrowHover, scrollerArrowPressed,
+    scrollerThumbBackground, scrollerThumbDetail, scrollerThumbHover, scrollerThumbPressed,
     paletteColorCount
 };
 
@@ -61,7 +63,8 @@ struct ThemeProfile {
         0x1F2938, 0x2A374A, 0xE5EBF5, 0x878B8F, 0x1F2938, 0x3B4A60,
         0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5, 0x3B4758, 0x3B4758,
         0x1F2938, 0x3B4758,
-        0x1F2938, 0x2A374A, 0xE5EBF5, 0x3B4A60, 0x305A8A
+        0x1F2938, 0x2A374A, 0xE5EBF5, 0x3B4A60, 0x305A8A,
+        0x61728A, 0x263244, 0x8093AC, 0xA4BAD4
     };
 };
 

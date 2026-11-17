@@ -96,8 +96,8 @@ PresetFile.Save(defaultPath, updatedDark);
 await monitor.PollOnceAsync();
 var updatedProfile = requests[^1].Item2;
 Check(requests.Count == 2 && requests[^1].Item1 == designer.Identity &&
-    updatedProfile.StartsWith("130815:", StringComparison.Ordinal) && updatedProfile.Split(',').Length == 44 &&
-    updatedProfile.EndsWith(",124578,112244,667799,293A4B,647586,A8B9CA,204162,6480A2", StringComparison.Ordinal),
+    updatedProfile.StartsWith("130815:", StringComparison.Ordinal) && updatedProfile.Split(',').Length == 48 &&
+    updatedProfile.EndsWith(",124578,112244,667799,293A4B,647586,A8B9CA,204162,6480A2,61728A,263244,8093AC,A4BAD4", StringComparison.Ordinal),
     "Changed splitter, corner and scroller colors at the same path reapply");
 
 config = config with { Rules = [new(null, platform, "Designer", "override.json")] };

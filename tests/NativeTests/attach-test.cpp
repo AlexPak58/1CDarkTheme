@@ -32,16 +32,16 @@ int wmain(int argc, wchar_t** argv)
         return input;
     };
     ThemeProfile profile;
-    check(parseProfile(palette(themeZoneMask, 44), profile) && profile.zones == themeZoneMask &&
+    check(parseProfile(palette(themeZoneMask, 48), profile) && profile.zones == themeZoneMask &&
           std::all_of(profile.colors.begin(), profile.colors.end(), [](DWORD color) { return color == 0xABCDEF; }),
-          "maximum six-digit mask accepts all v10 colors");
-    check(!parseProfile(palette(131072, 44), profile) && !parseProfile(palette(999999, 44), profile) &&
-          !parseProfile(palette(1000000, 44), profile) && !parseProfile(L"-" + palette(65536, 44), profile),
+          "maximum six-digit mask accepts all v11 colors");
+    check(!parseProfile(palette(262144, 48), profile) && !parseProfile(palette(131072, 44), profile) && !parseProfile(palette(999999, 48), profile) &&
+          !parseProfile(palette(1000000, 48), profile) && !parseProfile(L"-" + palette(65536, 44), profile),
           "out-of-range, overlong and negative masks refused");
-    check(parseProfile(palette(0, 44), profile) && !profile.zones && profile.colors.back() == 0xABCDEF,
-          "v10 colors parse with no zones enabled");
-    constexpr DWORD legacyMasks[] = {511, 1023, 2047, 4095, 8191, 16383, 16383, 32767, 65535};
-    constexpr size_t legacyCounts[] = {25, 29, 30, 31, 33, 35, 36, 37, 39};
+    check(parseProfile(palette(0, 48), profile) && !profile.zones && profile.colors.back() == 0xABCDEF,
+          "v11 colors parse with no zones enabled");
+    constexpr DWORD legacyMasks[] = {511, 1023, 2047, 4095, 8191, 16383, 16383, 32767, 65535, 131071};
+    constexpr size_t legacyCounts[] = {25, 29, 30, 31, 33, 35, 36, 37, 39, 44};
     const ThemeProfile defaults;
     for (size_t i = 0; i < std::size(legacyCounts); ++i) {
         const auto count = legacyCounts[i];
@@ -55,7 +55,8 @@ int wmain(int argc, wchar_t** argv)
     }
     check(parseProfile(palette(0, 35), profile) && !profile.zones, "legacy native palette keeps zones disabled");
     check(!parseProfile(palette(0, 34), profile) && !parseProfile(palette(0, 38), profile) &&
-          !parseProfile(palette(0, 40), profile) && !parseProfile(palette(0, 43), profile),
+          !parseProfile(palette(0, 40), profile) && !parseProfile(palette(0, 43), profile) &&
+          !parseProfile(palette(0, 45), profile) && !parseProfile(palette(0, 47), profile),
           "unexpected color counts refused");
     check(!parseProfile(palette(8192, 35) + L",GGGGGG", profile), "invalid v7 border refused");
 
@@ -131,8 +132,8 @@ int wmain(int argc, wchar_t** argv)
     const HMODULE loaded = LoadLibraryW(imagePath.c_str());
     check(loaded != nullptr, "load production fixture only into this test process");
     AttachImage image(imagePath);
-    check(image.validate() && GetProcAddress(loaded, "ThemeProfileAttachV10"),
-          "production image has v10 attach ABI and executable setter");
+    check(image.validate() && GetProcAddress(loaded, "ThemeProfileAttachV11"),
+          "production image has v11 attach ABI and executable setter");
     AttachModules modules;
     check(snapshotAttachModules(pid, imagePath, modules) == ERROR_SUCCESS &&
           modules.ownBase == reinterpret_cast<ULONG_PTR>(loaded) && !modules.competingDll, "matching mapped path");

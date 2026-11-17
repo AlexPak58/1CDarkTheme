@@ -73,16 +73,20 @@ int main(int argc, char** argv)
     check(argc == 2, "expected process mode");
     installationResult = ERROR_SUCCESS;  // Bypass production code patching in this standalone test.
     ThemeProfile profile;
-    check(profile.version == 10 && profile.size == 188 && profile.zones == 130815 &&
+    check(profile.version == 11 && profile.size == 204 && profile.zones == 130815 &&
           panelBorder == 35 && dockSplitterFill == 36 && scrollerCornerBackground == 37 && scrollerCornerBorder == 38 &&
           scrollerTrackBackground == 39 && scrollerArrowBackground == 40 && scrollerArrowGlyph == 41 &&
-          scrollerArrowHover == 42 && scrollerArrowPressed == 43 && paletteColorCount == 44 &&
+          scrollerArrowHover == 42 && scrollerArrowPressed == 43 && scrollerThumbBackground == 44 && scrollerThumbDetail == 45 &&
+          scrollerThumbHover == 46 && scrollerThumbPressed == 47 && paletteColorCount == 48 &&
+          themeZoneMask == 262143 && enableScrollerThumb == 131072 && !(profile.zones & enableScrollerThumb) &&
           profile.colors[panelHeaderBackground] == 0x1F2938 && profile.colors[panelHeaderText] == 0xE5EBF5 &&
           profile.colors[panelBorder] == 0x3B4758 && profile.colors[dockSplitterFill] == 0x3B4758 &&
           profile.colors[scrollerCornerBackground] == 0x1F2938 && profile.colors[scrollerCornerBorder] == 0x3B4758 &&
           profile.colors[scrollerTrackBackground] == 0x1F2938 && profile.colors[scrollerArrowBackground] == 0x2A374A &&
           profile.colors[scrollerArrowGlyph] == 0xE5EBF5 && profile.colors[scrollerArrowHover] == 0x3B4A60 &&
-          profile.colors[scrollerArrowPressed] == 0x305A8A,
+          profile.colors[scrollerArrowPressed] == 0x305A8A &&
+          profile.colors[scrollerThumbBackground] == 0x61728A && profile.colors[scrollerThumbDetail] == 0x263244 &&
+          profile.colors[scrollerThumbHover] == 0x8093AC && profile.colors[scrollerThumbPressed] == 0xA4BAD4,
           "dark profile defaults include panel headers, borders, dock splitters and scroller colors");
     profile.zones = enableSearchResults;
     if (std::strcmp(argv[1], "DESIGNER") != 0) {
@@ -146,6 +150,12 @@ int main(int argc, char** argv)
           activeProfile.load()->colors[panelHeaderBackground] == 0x448855 &&
           activeProfile.load()->colors[panelHeaderText] == 0xCCDDEE &&
           activeProfile.load()->colors[panelBorder] == 0x246810, "accept panel header and border palette in isolation");
+    profile.zones = enableScrollerThumb;
+    profile.colors[scrollerThumbBackground] = 0xABCDEF;
+    check(SetThemeProfile(&profile) == ERROR_SUCCESS &&
+          activeProfile.load()->zones == enableScrollerThumb &&
+          activeProfile.load()->colors[scrollerThumbBackground] == 0xABCDEF,
+          "accept thumb palette only when explicitly enabled");
     profile.zones = enableTreeOnly;
     profile.colors[treeBackground] = 0x345678;
     check(SetThemeProfile(&profile) == ERROR_SUCCESS, "second profile");
@@ -171,7 +181,7 @@ int main(int argc, char** argv)
     check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject incompatible profile version");
     profile.version = themeProfileVersion;
     profile.size -= static_cast<DWORD>(sizeof(DWORD));
-    check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject v9 profile with truncated size");
+    check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject truncated profile size");
     profile.size = static_cast<DWORD>(sizeof(profile));
     profile.colors[panelBorder] = 0x01000000;
     check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER && activeProfile.load()->zones == 0,

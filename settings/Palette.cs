@@ -13,9 +13,9 @@ internal sealed record Preset(string Name, int Mask, string[] Colors);
 
 internal static class Palette
 {
-    public const int Version = 10;
-    public const int AllZones = 131071;
-    public const int ColorCount = 44;
+    public const int Version = 11;
+    public const int AllZones = 262143;
+    public const int ColorCount = 48;
     public const int PanelHeaders = 8192;
     public const int DockSplitters = 16384;
     public const int DockSplitterFill = 36;
@@ -23,6 +23,11 @@ internal static class Palette
     public const int ScrollerCornerFill = 37;
     public const int ScrollerPng = 65536;
     public const int ScrollerTrack = 39;
+    public const int ScrollerThumb = 131072;
+    public const int ScrollerThumbBackground = 44;
+    public const int ScrollerThumbDetail = 45;
+    public const int ScrollerThumbHover = 46;
+    public const int ScrollerThumbPressed = 47;
     private const int DefaultZones = 7935 | PanelHeaders | DockSplitters | ScrollerCorner | ScrollerPng;
     public const int MaxPresetName = 60;
     public const string DefaultName = "Тёмная";
@@ -53,7 +58,9 @@ internal static class Palette
         new(ScrollerCorner, "Угол полос прокрутки редактора", ScrollerCornerFill, ["Фон", "Граница"]),
         new(ScrollerPng, "Дорожки и стрелки прокрутки", ScrollerTrack,
             ["Фон дорожки", "Фон кнопок", "Стрелки", "Кнопки при наведении", "Нажатые кнопки"],
-            "Полосы прокрутки дерева конфигурации и редактора модулей. Ползунок сохраняет штатные цвета.")
+            "Полосы прокрутки дерева конфигурации и редактора модулей. Бегунки включаются отдельным переключателем."),
+        new(ScrollerThumb, "Бегунки прокрутки (эксперимент)", ScrollerThumbBackground,
+            ["Фон бегунка", "Детали", "При наведении", "При нажатии"])
     ];
 
     private static readonly string[] Dark =
@@ -65,7 +72,8 @@ internal static class Palette
         "#1F2938", "#2A374A", "#E5EBF5", "#878B8F", "#1F2938", "#3B4A60",
         "#1F2938", "#E5EBF5", "#1F2938", "#E5EBF5", "#3B4758", "#3B4758",
         "#1F2938", "#3B4758",
-        "#1F2938", "#2A374A", "#E5EBF5", "#3B4A60", "#305A8A"
+        "#1F2938", "#2A374A", "#E5EBF5", "#3B4A60", "#305A8A",
+        "#61728A", "#263244", "#8093AC", "#A4BAD4"
     ];
 
     public static readonly Preset[] BuiltIns =
@@ -80,7 +88,8 @@ internal static class Palette
             "#262629", "#3A373B", "#F3F0ED", "#8E8882", "#262629", "#464249",
             "#262629", "#F3F0ED", "#262629", "#F3F0ED", "#49454C", "#49454C",
             "#262629", "#49454C",
-            "#262629", "#3A373B", "#F3F0ED", "#49454C", "#614742"
+            "#262629", "#3A373B", "#F3F0ED", "#49454C", "#614742",
+            "#706A76", "#37323B", "#94899C", "#B4A5BD"
         ]),
         new(PinkName, DefaultZones,
         [
@@ -91,7 +100,8 @@ internal static class Palette
             "#FFF4F7", "#F6DCE7", "#3C2433", "#663B4F", "#F9E7EE", "#B47C96",
             "#FFF4F7", "#3C2433", "#F8E1E9", "#3C2433", "#B87999", "#D9ADBF",
             "#F9E7EE", "#B87999",
-            "#F9E7EE", "#F6DCE7", "#523044", "#E9AAC5", "#D58DAF"
+            "#F9E7EE", "#F6DCE7", "#523044", "#E9AAC5", "#D58DAF",
+            "#D9ADBF", "#895269", "#E9BCD1", "#F1A7CA"
         ]),
         new(NativeName, 0, Dark)
     ];
@@ -107,6 +117,7 @@ internal static class Palette
         7 => (16383, 36),
         8 => (32767, 37),
         9 => (65535, 39),
+        10 => (131071, 44),
         Version => (AllZones, ColorCount),
         _ => throw new InvalidDataException("Неподдерживаемая версия палитры.")
     };

@@ -23,6 +23,8 @@ std::atomic<DWORD> activeCollectors{};
 bool attempted{};
 DWORD sampleCount{};
 PropertyTextProbeCounts counts{};
+PropertyTextDiagnostics diagnostics{};
+propertyTextControl::ImageRanges diagnosticImages{};
 std::array<PropertyTextSample, propertyTextProbeCapacity> samples{};
 
 static_assert(std::atomic<ULONG_PTR>::is_always_lock_free);
@@ -51,7 +53,7 @@ struct StackRange {
 template <typename Reader = GuardedReader>
 Outcome captureIdentity(const CONTEXT& ctx, ULONG_PTR frame, Identity& identity,
                         PropertyTextArguments& arguments, const Reader& read = {}, Stage* stage = nullptr,
-                        ULONG_PTR text = 0)
+                        ULONG_PTR text = 0, propertyTextControl::Diagnostic* diagnostic = nullptr)
 {
     setStage(stage, Stage::Input);
     if (!frame || !text || !ctx.Rsi) return Outcome::ReadFailure;
@@ -71,7 +73,7 @@ Outcome captureIdentity(const CONTEXT& ctx, ULONG_PTR frame, Identity& identity,
         !stack.readAt(ctx.Rsp, 0x60, arguments.right) || !stack.readAt(ctx.Rsp, 0x64, arguments.bottom))
         return Outcome::ReadFailure;
     if (!validPropertyTextArguments(arguments)) return Outcome::Mismatch;
-    return propertyTextControl::inspectText(frame, text, ctx.Rsi, identity, read, stage);
+    return propertyTextControl::inspectText(frame, text, ctx.Rsi, identity, read, stage, diagnostic, diagnosticImages);
 }
 
 void recordSample(const Identity& identity, const PropertyTextArguments& arguments)
@@ -84,6 +86,27 @@ void recordSample(const Identity& identity, const PropertyTextArguments& argumen
     ++counts.accepted;
 }
 
+void recordDiagnostic(const propertyTextControl::Diagnostic& key)
+{
+    using namespace propertyTextControl;
+    const auto increment = [](ULONGLONG& count) {
+        if (count == MAXULONGLONG) diagnostics.overflow = 1;
+        else ++count;
+    };
+    const auto reason = static_cast<size_t>(key.reason);
+    if (!reason || reason >= diagnostics.reasons.size()) { diagnostics.overflow = 1; return; }
+    increment(diagnostics.reasons[reason]);
+    const size_t bucket = key.windowTable == TableToken{Module::Text, propertyTextControl::windowTypeRva} ? 1 : 0;
+    const auto start = bucket * propertyTextDiagnosticReserve;
+    auto& used = diagnostics.used[bucket];
+    for (size_t i = 0; i < used; ++i) {
+        auto& group = diagnostics.groups[start + i];
+        if (group.key == key) { increment(group.calls); return; }
+    }
+    if (used == propertyTextDiagnosticReserve) { increment(diagnostics.drops[bucket]); return; }
+    diagnostics.groups[start + used++] = {key, 1};
+}
+
 void recordCall(const CONTEXT& context, ULONG_PTR frame)
 {
     if (!TryAcquireSRWLockExclusive(&sampleLock)) {
@@ -93,7 +116,8 @@ void recordCall(const CONTEXT& context, ULONG_PTR frame)
     Identity identity{};
     PropertyTextArguments arguments{};
     Stage stage{};
-    switch (captureIdentity(context, frame, identity, arguments, GuardedReader{}, &stage, textModule)) {
+    propertyTextControl::Diagnostic diagnostic{};
+    switch (captureIdentity(context, frame, identity, arguments, GuardedReader{}, &stage, textModule, &diagnostic)) {
     case Outcome::ReadFailure:
         ++counts.readFailures; ++counts.rejectedStages[static_cast<size_t>(stage)];
         break;
@@ -102,6 +126,7 @@ void recordCall(const CONTEXT& context, ULONG_PTR frame)
         break;
     case Outcome::Accepted: recordSample(identity, arguments); break;
     }
+    if (stage == Stage::WindowTables) recordDiagnostic(diagnostic);
     ReleaseSRWLockExclusive(&sampleLock);
 }
 
@@ -173,6 +198,19 @@ struct ModuleRef {
     bool acquire(const wchar_t* name) { return GetModuleHandleExW(0, name, &module) != FALSE; }
 };
 
+bool diagnosticImage(HMODULE module, propertyTextControl::ImageRange& range)
+{
+    const auto base = reinterpret_cast<ULONG_PTR>(module);
+    IMAGE_DOS_HEADER dos{};
+    IMAGE_NT_HEADERS64 nt{};
+    if (!GuardedReader{}.read(base, 0, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0 ||
+        !GuardedReader{}.read(base, static_cast<ULONG_PTR>(dos.e_lfanew), nt) ||
+        nt.Signature != IMAGE_NT_SIGNATURE || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+        !nt.OptionalHeader.SizeOfImage || nt.OptionalHeader.SizeOfImage > 0x10000000) return false;
+    range = {base, nt.OptionalHeader.SizeOfImage};
+    return true;
+}
+
 DWORD prepare(PatchSite& site)
 {
     ModuleRef frame, graphics, base, text;
@@ -196,6 +234,10 @@ DWORD prepare(PatchSite& site)
         if (!GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(module), &pinned) || pinned != module)
             return lastErrorOr(ERROR_DLL_INIT_FAILED);
     }
+    if (!diagnosticImage(frame.module, diagnosticImages[0]) ||
+        !diagnosticImage(text.module, diagnosticImages[1]) ||
+        !diagnosticImage(base.module, diagnosticImages[2])) return ERROR_BAD_EXE_FORMAT;
+    for (size_t i = 0; i < diagnosticImages.size(); ++i) diagnostics.moduleSizes[i] = diagnosticImages[i].size;
     frameModule = reinterpret_cast<ULONG_PTR>(frame.module);
     textModule = reinterpret_cast<ULONG_PTR>(text.module);
     if (!GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(frame.module), &pinned) ||
@@ -292,6 +334,7 @@ DWORD copySamples(PropertyTextProbeTrace& trace)
     trace.sampleCount = sampleCount;
     trace.samples = samples;
     trace.counts = counts;
+    trace.diagnostics = diagnostics;
     trace.counts.busyDrops = busyDrops.load(std::memory_order_relaxed);
     ReleaseSRWLockExclusive(&sampleLock);
     return ERROR_SUCCESS;
@@ -356,12 +399,12 @@ DWORD publish(void* output, const PropertyTextProbeTrace& trace, DWORD result)
 
 } // namespace
 
-extern "C" __declspec(dllexport) DWORD WINAPI PropertyTextProbeAbiV1(void*)
+extern "C" __declspec(dllexport) DWORD WINAPI PropertyTextProbeAbiV2(void*)
 {
     return propertyTextProbeVersion;
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI RunPropertyTextProbeV1(void* output)
+extern "C" __declspec(dllexport) DWORD WINAPI RunPropertyTextProbeV2(void* output)
 {
     if (!validInput(output)) return ERROR_INVALID_PARAMETER;
     PropertyTextProbeTrace trace;

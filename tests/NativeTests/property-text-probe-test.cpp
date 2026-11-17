@@ -251,6 +251,102 @@ void testCapture() {
     ctx.Rsp = address(stack)+1; require(capture() == Outcome::ReadFailure, "unaligned stack");
     ctx.Rsp = address(stack); ctx.Rsi = 1; require(capture() == Outcome::ReadFailure, "unreadable window");
 }
+struct WindowDiagnosticReader : GuardedReader {
+    using GuardedReader::read;
+    mutable unsigned reads{}, images{};
+    unsigned failRead{}, failImage{};
+    std::array<ULONG_PTR, 8> values{
+        fakeText + propertyTextControl::windowTypeRva, fakeText + propertyTextControl::contextTypeRva,
+        0x100000100, fakeText + 0xDC0E5, fakeFrame + 0xA65200,
+        fakeFrame + 0xA64B78, fakeFrame + 0xA64200, 0x200000190};
+    bool read(ULONG_PTR, ULONG_PTR, ULONG_PTR& value) const {
+        ++reads;
+        if (reads == failRead || reads > values.size()) return false;
+        value = values[reads - 1];
+        return true;
+    }
+    bool imageTable(ULONG_PTR, ULONG_PTR, SIZE_T) const { return ++images != failImage; }
+};
+
+void testWindowDiagnostics() {
+    using namespace propertyTextControl;
+    const ImageRanges ranges{{{fakeFrame, 0x1000000}, {fakeText, 0x1000000}, {0x183000000, 0x100000}}};
+    const auto check = [&](WindowDiagnosticReader& reader, Outcome expected, Reason reason, unsigned reads) {
+        propertyTextControl::Identity identity{};
+        Diagnostic diagnostic{};
+        Stage stage{};
+        const auto outcome = inspectText(fakeFrame, fakeText, 0x200000000, identity, reader, &stage, &diagnostic, ranges);
+        require(outcome == expected && diagnostic.reason == reason && reader.reads == reads,
+                "first reason and original read sequence");
+        if (reason != Reason::WindowTable && reason != Reason::ReadWindow)
+            require(diagnostic.windowTable == TableToken{Module::Text, propertyTextControl::windowTypeRva}, "bounded exact W token");
+    };
+    for (size_t i = 0; i < 8; ++i) {
+        WindowDiagnosticReader reader;
+        reader.values[i] = i == 2 ? 0x100 : 1;
+        check(reader, Outcome::Mismatch, static_cast<Reason>(i + 1), i < 3 ? 3 : 8);
+    }
+    constexpr Reason readReasons[]{Reason::ReadWindow, Reason::ReadContext, Reason::ReadAnchor,
+        Reason::ReadMethod, Reason::ReadRoot, Reason::ReadRootView, Reason::ReadRootDraw, Reason::ReadBack};
+    for (unsigned i = 1; i <= 8; ++i) {
+        WindowDiagnosticReader reader;
+        reader.failRead = i;
+        check(reader, Outcome::ReadFailure, readReasons[i - 1], i);
+    }
+    constexpr Reason imageReasons[]{Reason::ImageWindow, Reason::ImageContext, Reason::ImageRoot,
+        Reason::ImageRootView, Reason::ImageRootDraw};
+    for (unsigned i = 1; i <= 5; ++i) {
+        WindowDiagnosticReader reader;
+        reader.failImage = i;
+        check(reader, Outcome::ReadFailure, imageReasons[i - 1], i < 3 ? 3 : 8);
+    }
+    propertyTextControl::Identity identity{}; Diagnostic diagnostic{}; Stage stage{};
+    require(inspectText(0, fakeText, 1, identity, WindowDiagnosticReader{}, &stage, &diagnostic, ranges) ==
+        Outcome::ReadFailure && diagnostic.reason == Reason::ReadInput && diagnostic.windowTable == TableToken{},
+        "input failure has sanitized zero token");
+    WindowDiagnosticReader reader;
+    reader.values[0] = 0xDEADBEEF12345678;
+    require(inspectText(fakeFrame, fakeText, 0x200000000, identity, reader, &stage, &diagnostic, ranges) ==
+        Outcome::Mismatch && diagnostic.windowTable == TableToken{}, "unknown absolute pointer becomes Other RVA0");
+    require(tableToken(0x183100000, ranges) == TableToken{} &&
+        tableToken(fakeFrame - 1, ranges) == TableToken{} &&
+        tableToken(fakeText + 0x1000000, ranges) == TableToken{Module::Wbase, 0} &&
+        tableToken(fakeFrame + 5, ranges) == TableToken{Module::Frame, 5} &&
+        tableToken(0x183000010, ranges) == TableToken{Module::Wbase, 16}, "all image bounds and identities");
+    diagnostics = {};
+    for (DWORD i = 0; i < propertyTextDiagnosticReserve; ++i)
+        recordDiagnostic({Reason::WindowTable, {Module::Frame, i}});
+    recordDiagnostic({Reason::WindowTable, {Module::Frame, 100}});
+    require(diagnostics.used[0] == propertyTextDiagnosticReserve && diagnostics.drops[0] == 1 &&
+        diagnostics.used[1] == 0, "other histogram bounded independently");
+    for (DWORD i = 1; i <= propertyTextDiagnosticReserve; ++i)
+        recordDiagnostic({static_cast<Reason>(i), {Module::Text, propertyTextControl::windowTypeRva}});
+    recordDiagnostic({Reason::ReadRootView, {Module::Text, propertyTextControl::windowTypeRva}});
+    recordDiagnostic({Reason::WindowTable, {Module::Frame, 0}});
+    recordDiagnostic({Reason::WindowTable, {Module::Text, propertyTextControl::windowTypeRva}});
+    require(diagnostics.used[1] == propertyTextDiagnosticReserve && diagnostics.drops[1] == 1 &&
+        diagnostics.groups[0].calls == 2 && diagnostics.groups[propertyTextDiagnosticReserve].calls == 2,
+        "exact target reserve cannot starve; full buffers still update existing keys");
+    diagnostics.groups[0].calls = MAXULONGLONG;
+    recordDiagnostic({Reason::WindowTable, {Module::Frame, 0}});
+    require(diagnostics.overflow == 1 && diagnostics.groups[0].calls == MAXULONGLONG,
+        "group overflow flagged without wrapping");
+    diagnostics = {};
+    for (DWORD i = 0; i < propertyTextDiagnosticReserve; ++i)
+        recordDiagnostic({Reason::WindowTable, {Module::Frame, i}});
+    diagnostics.drops[0] = MAXULONGLONG;
+    recordDiagnostic({Reason::WindowTable, {Module::Frame, 100}});
+    require(diagnostics.overflow == 1 && diagnostics.drops[0] == MAXULONGLONG, "drop overflow flagged");
+    propertyTextControl::ImageRange actualImage{};
+    require(diagnosticImage(GetModuleHandleW(nullptr), actualImage) && actualImage.size &&
+        !diagnosticImage(nullptr, actualImage), "PE image size read outside collector");
+    diagnostics = {};
+    diagnostics.reasons[1] = MAXULONGLONG;
+    recordDiagnostic({Reason::WindowTable, {}});
+    require(diagnostics.overflow == 1 && diagnostics.reasons[1] == MAXULONGLONG, "reason overflow flagged");
+    diagnostics = {};
+}
+
 void testReplayAndPatch() {
     auto* code = static_cast<BYTE*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE));
     require(code != nullptr, "allocate code");
@@ -342,12 +438,14 @@ void testAggregationAndContention() {
 } // namespace
 int main() {
     PropertyTextProbeTrace trace;
-    require(PropertyTextProbeAbiV1(nullptr)==1,"ABI1"); trace.version=0;
-    require(RunPropertyTextProbeV1(&trace)==ERROR_INVALID_PARAMETER && !attempted,"bad ABI before oneshot");
-    trace.version=1; trace.size=8;
-    require(RunPropertyTextProbeV1(&trace)==ERROR_INVALID_PARAMETER && !attempted,"short payload");
+    require(PropertyTextProbeAbiV2(nullptr)==2,"ABI2"); trace.version=0;
+    require(RunPropertyTextProbeV2(&trace)==ERROR_INVALID_PARAMETER && !attempted,"bad ABI before oneshot");
+    trace.version=1;
+    require(RunPropertyTextProbeV2(&trace)==ERROR_INVALID_PARAMETER && !attempted,"stale ABI1 before oneshot");
+    trace.version=2; trace.size=8;
+    require(RunPropertyTextProbeV2(&trace)==ERROR_INVALID_PARAMETER && !attempted,"short payload");
     trace.size=sizeof(trace); attempted=true;
-    require(RunPropertyTextProbeV1(&trace)==ERROR_ALREADY_EXISTS,"oneshot");
-    testCapture(); testReplayAndPatch(); testAggregationAndContention();
+    require(RunPropertyTextProbeV2(&trace)==ERROR_ALREADY_EXISTS,"oneshot");
+    testCapture(); testWindowDiagnostics(); testReplayAndPatch(); testAggregationAndContention();
     std::puts("PASS: ID11 selector, stack guards, exact MOV replay and rollback");
 }

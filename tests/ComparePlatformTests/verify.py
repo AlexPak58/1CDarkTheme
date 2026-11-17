@@ -80,6 +80,68 @@ def verify_dock(find, image):
     return reject(find, image, mutations)
 
 
+def verify_commandbar(find, image):
+    hit = baseline(find, image)
+    creator = address(hit, "creator")
+    main = address(hit, "primary_vtable")
+    style = address(hit, "style_vtable")
+    style_store = address(hit, "style_vtable_store")
+    owner_store = address(hit, "owner_bar_store")
+    pen_call = address(hit, "pen_call")
+    pen_store = address(hit, "pen_handle_store")
+    cache_store = address(hit["roles"][1], "cache_store")
+    setters = {address(setter, "slot"): setter for setter in hit["style_setters"]}
+    assign = address(setters[0x80], "assignment_call")
+    background_assign = address(setters[0x88], "assignment_call")
+    alloc = address(hit, "allocation_call")
+    initializer = address(hit, "initializer")
+    records = {begin: (end, unwind) for begin, end, unwind in image.runtime_functions() if begin < end}
+    initializer_end, _ = records[initializer]
+    _, child_unwind = records[initializer_end]
+    unwind_codes = image.read("B", image.offset(child_unwind + 2))
+    chained_parent = child_unwind + 4 + 2 * ((unwind_codes + 1) & ~1)
+
+    def import_slot(call):
+        return call + 6 + image.read("i", image.offset(call + 2))
+
+    def function_pointer(record, field):
+        return struct.pack("<Q", image.image_base + address(record, field))
+
+    mutations = [
+        redirect(image, "allocation calls another import", alloc + 2, import_slot(assign)),
+        patch(image, "jump over allocation at entry", creator,
+              b"\xe9" + struct.pack("<i", style_store - creator - 5)),
+        redirect(image, "base construction calls a setter", address(hit, "base_constructor_call") + 1,
+                 address(setters[0x80], "function")),
+        redirect(image, "bar initialization calls a setter", address(hit, "initializer_call") + 1,
+                 address(setters[0x80], "function")),
+        patch(image, "initializer unwind fragment names wrong parent", chained_parent,
+              struct.pack("<I", initializer + 1)),
+        redirect(image, "style vptr points into executable section", style_store - 4,
+                 address(setters[0x80], "function")),
+        redirect(image, "style vptr points to primary table", style_store - 4, main),
+        patch(image, "style vptr writes the wrong subobject", style_store + 3, b"\x60"),
+        patch(image, "owner pointer written through wrong receiver", owner_store + 2, b"\x98"),
+        clip_unwind(image, "owner store outside constructor unwind", creator, owner_store),
+        patch(image, "substituted role 0 setter", style + 0x80, function_pointer(setters[0xA8], "function")),
+        patch(image, "wrong role 0 setter field", assign - 4, b"\x4c"),
+        patch(image, "wrong role 2 setter flag", background_assign + 8, b"\x18"),
+        redirect(image, "wrong role 0 setter import", assign + 2, import_slot(pen_call)),
+        patch(image, "refresh points to setter", style + 0xB0, function_pointer(setters[0x80], "function")),
+        patch(image, "wrong refresh receiver adjustment", address(hit, "cleanup_dispatch") - 1, b"\xa0"),
+        patch(image, "wrong refresh resolver slot", address(hit, "resolver_dispatch") + 2, b"\xc0"),
+        patch(image, "resolver points to cleanup", main + 0xB8, function_pointer(hit, "cleanup")),
+        patch(image, "role function points to cleanup", main + 0x178, function_pointer(hit, "cleanup")),
+        patch(image, "wrong role 2 index", cache_store - 4, b"\x03"),
+        patch(image, "wrong role 1 result cache", cache_store + 2, b"\x70"),
+        patch(image, "pen uses another cached role", pen_call - 11, b"\x70"),
+        redirect(image, "wrong pen import", pen_call + 2, import_slot(assign)),
+        patch(image, "wrong pen handle field", pen_store + 3, b"\xa0"),
+        clip_unwind(image, "pen store outside resolver unwind", address(hit, "resolver"), pen_store),
+    ]
+    return reject(find, image, mutations)
+
+
 def instruction_operand(code, start, end, pattern):
     """Return the location of the sole captured operand in an anchor window."""
     match, = re.compile(pattern, re.DOTALL).finditer(code, start, end)
@@ -153,19 +215,23 @@ def main():
     args = parser.parse_args()
     compare = runpy.run_path(str(Path(__file__).resolve().parents[2] / "compare-platform.py"))
     image = compare["Image"]
-    counter_total = dock_total = 0
+    counter_total = dock_total = commandbar_total = 0
     for directory in args.directories:
         try:
-            dock_count = verify_dock(compare["dock_title_style_candidates"], image(directory / "frame.dll"))
+            frame = image(directory / "frame.dll")
+            dock_count = verify_dock(compare["dock_title_style_candidates"], frame)
+            commandbar_count = verify_commandbar(compare["commandbar_palette_candidates"], frame)
             frontend = directory / "frntend.dll"
             counter_count = verify_counter(compare["search_counter_candidates"], image(frontend)) if frontend.is_file() else 0
         except (OSError, ValueError) as error:
             parser.exit(1, f"{directory}: {error}\n")
         counter_total += counter_count
         dock_total += dock_count
+        commandbar_total += commandbar_count
         counter_status = f"1 candidate, {counter_count} rejected mutations" if counter_count else "frntend.dll absent"
-        print(f"{directory}: dock 1 candidate, {dock_count} rejected mutations; counter {counter_status}")
-    print(f"Total rejected: {counter_total} counter, {dock_total} dock")
+        print(f"{directory}: dock 1 candidate, {dock_count} rejected mutations; "
+              f"command bar 1 candidate, {commandbar_count} rejected mutations; counter {counter_status}")
+    print(f"Total rejected: {counter_total} counter, {dock_total} dock, {commandbar_total} command bar")
 
 
 if __name__ == "__main__":

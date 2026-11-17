@@ -127,7 +127,7 @@ using TraceResult = GridTrace;
 constexpr char traceExport[] = "ReadGridTraceV4";
 #elif defined(THEME_SEARCH_RESULTS_TRACE)
 using TraceResult = SearchResultsTrace;
-constexpr char traceExport[] = "ReadSearchResultsTraceV1";
+constexpr char traceExport[] = "ReadSearchResultsTraceV2";
 #endif
 
 #ifdef THEME_HAS_TRACE
@@ -156,6 +156,12 @@ DWORD readTrace(HANDLE child, DWORD pid, const std::wstring& dll)
                 "  Other grid class: %lu\n",
                 trace.cachedColorCalls, trace.originalColorCalls,
                 trace.unexpectedColorCalls, trace.otherGridCalls);
+    std::puts("Second cached-color read (calls since previous read):");
+    std::printf("  Matching grid class: %lu\n  Other grid class: %lu\n",
+                trace.cachedColorCopies, trace.otherGridColorCopies);
+    std::puts("White palette writes across all receivers (calls since previous read):");
+    for (size_t i = 0; i < trace.whiteWrites.size(); ++i)
+        std::printf("  frame+0x%llX: %lu\n", searchGridWhiteWriteRvas[i], trace.whiteWrites[i]);
 #elif defined(THEME_GRID_TRACE)
     std::puts("Spreadsheet grid rectangles (x, y, width, height, calls since previous read):");
     for (const auto& sample : trace.rectangles) {

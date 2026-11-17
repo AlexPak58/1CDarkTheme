@@ -2,11 +2,18 @@
 
 #include "platform.hpp"
 
+inline constexpr std::array<ULONG_PTR, 4> searchGridWhiteWriteRvas{
+    0x2F0997, 0x2F0B76, 0x2F0E13, 0x2F0EA0,
+};
+
 struct SearchResultsTrace {
     DWORD cachedColorCalls;
     DWORD originalColorCalls;
     DWORD unexpectedColorCalls;
     DWORD otherGridCalls;
+    DWORD cachedColorCopies;
+    DWORD otherGridColorCopies;
+    std::array<DWORD, searchGridWhiteWriteRvas.size()> whiteWrites;
 };
 
-static_assert(sizeof(SearchResultsTrace) == 4 * sizeof(DWORD));
+static_assert(sizeof(SearchResultsTrace) == (6 + searchGridWhiteWriteRvas.size()) * sizeof(DWORD));

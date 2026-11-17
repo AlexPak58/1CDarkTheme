@@ -1,0 +1,50 @@
+@echo off
+setlocal
+if /i not "%VSCMD_ARG_TGT_ARCH%"=="x64" (
+    echo Run from an x64 Native Tools Command Prompt. 1>&2
+    exit /b 2
+)
+if "%~1"=="" (
+    echo Usage: run.cmd ^<new external artifact directory^> 1>&2
+    exit /b 2
+)
+set "OUT=%~f1"
+if exist "%OUT%" (
+    echo Use a new artifact directory. 1>&2
+    exit /b 2
+)
+pushd "%~dp0..\.."
+if errorlevel 1 exit /b 1
+mkdir "%OUT%\legacy"
+if errorlevel 1 goto failed
+call "%CD%\build.cmd" "%OUT%\normal"
+if errorlevel 1 goto failed
+call "%CD%\build.cmd" "%OUT%\trace" search-results-trace
+if errorlevel 1 goto failed
+call "%CD%\build.cmd" "%OUT%\color" search-results-color-test
+if errorlevel 1 goto failed
+call "%CD%\build.cmd" "%OUT%\background" int3-bg
+if errorlevel 1 goto failed
+for %%T in (profile-test attach-test caption-test install-test) do (
+    cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /I. "%~dp0%%T.cpp" /Fo"%OUT%\%%T.obj" /Fe"%OUT%\%%T.exe" /link bcrypt.lib dwmapi.lib user32.lib
+    if errorlevel 1 goto failed
+)
+cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /LD "%~dp0legacy-test.cpp" /Fo"%OUT%\legacy\test.obj" /Fe"%OUT%\legacy\tree-theme.dll"
+if errorlevel 1 goto failed
+"%OUT%\profile-test.exe" DESIGNER
+if errorlevel 1 goto failed
+"%OUT%\profile-test.exe" ENTERPRISE
+if errorlevel 1 goto failed
+"%OUT%\attach-test.exe" "%OUT%\normal\tree-theme.dll" "%OUT%\legacy\tree-theme.dll"
+if errorlevel 1 goto failed
+"%OUT%\caption-test.exe"
+if errorlevel 1 goto failed
+"%OUT%\install-test.exe"
+if errorlevel 1 goto failed
+"%OUT%\normal\tree-theme-run.exe" --attach bogus 1 --palette impossible
+if not "%errorlevel%"=="2" goto failed
+popd
+exit /b 0
+:failed
+popd
+exit /b 1

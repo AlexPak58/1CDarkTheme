@@ -1,9 +1,12 @@
 #include "platform.hpp"
+#include "attach_process.hpp"
 #include "list_identity.hpp"
 
 #include <atomic>
 #include <cstring>
 #include <dwmapi.h>
+#include <intrin.h>
+#include <optional>
 
 static_assert(sizeof(void*) == 8);
 
@@ -64,72 +67,90 @@ ULONG_PTR graphicsBase;
 ULONG_PTR frontendBase;
 SRWLOCK installationLock = SRWLOCK_INIT;
 constexpr ThemeProfile defaultProfile{};
-ThemeProfile customProfile;
-std::atomic<const ThemeProfile*> activeProfile{&defaultProfile};
-std::atomic<ULONG_PTR> activeTheme{0};
+constexpr ThemeProfile disabledProfile{sizeof(ThemeProfile), themeProfileVersion, 0};
+// A breakpoint handler may still be reading an earlier profile. Never recycle its slot.
+std::array<std::optional<ThemeProfile>, 1024> profileHistory;
+size_t profileCount{};
+std::atomic<const ThemeProfile*> activeProfile{&disabledProfile};
 DWORD installationResult = ERROR_NOT_READY;
-bool customApplied;
 
-HWND captionWindow;
+using CaptionTarget = DesignerWindow;
 
-BOOL CALLBACK findCaptionWindow(HWND window, LPARAM param)
+struct CaptionColors {
+    COLORREF background{defaultDwmColor};
+    COLORREF text{defaultDwmColor};
+};
+
+struct CaptionState {
+    CaptionTarget target;
+    CaptionColors colors;
+};
+
+CaptionState appliedCaption;
+bool captionStateUncertain;
+
+bool captionStillOwned(const CaptionTarget& target)
 {
+    if (!target.window) return false;
     DWORD pid{};
-    GetWindowThreadProcessId(window, &pid);
-    if (pid != GetCurrentProcessId() || !IsWindowVisible(window) ||
-        GetWindow(window, GW_OWNER) || (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) ||
-        (GetWindowLongPtrW(window, GWL_STYLE) & WS_CAPTION) != WS_CAPTION) return TRUE;
-
-    auto& candidate = *reinterpret_cast<HWND*>(param);
-    if (candidate) {
-        candidate = nullptr;
-        return FALSE;
-    }
-    candidate = window;
-    return TRUE;
+    const DWORD thread = GetWindowThreadProcessId(target.window, &pid);
+    return thread == target.thread && pid == GetCurrentProcessId();
 }
 
-HRESULT setCaptionColors(HWND window, COLORREF background, COLORREF text)
+HRESULT setCaptionColors(const CaptionTarget& target, CaptionColors colors, bool rollback = false)
 {
-    const HRESULT fill = DwmSetWindowAttribute(window, captionColorAttribute,
-                                               &background, sizeof(background));
-    if (FAILED(fill)) return fill;
-    return DwmSetWindowAttribute(window, captionTextColorAttribute, &text, sizeof(text));
+    if (!captionStillOwned(target)) return rollback ? S_OK : HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+    const HRESULT fill = DwmSetWindowAttribute(target.window, captionColorAttribute,
+                                               &colors.background, sizeof(colors.background));
+    if (FAILED(fill) && !rollback) return fill;
+    if (!captionStillOwned(target)) return rollback ? S_OK : HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+    const HRESULT text = DwmSetWindowAttribute(target.window, captionTextColorAttribute,
+                                               &colors.text, sizeof(colors.text));
+    return FAILED(fill) ? fill : text;
 }
 
-HRESULT restoreCaption()
+bool rollbackCaption(const CaptionTarget& target, CaptionColors colors)
 {
-    if (!captionWindow) return S_OK;
-    DWORD pid{};
-    GetWindowThreadProcessId(captionWindow, &pid);
-    if (pid != GetCurrentProcessId()) {
-        captionWindow = nullptr;
-        return S_OK;
-    }
-
-    const HRESULT result = setCaptionColors(captionWindow, defaultDwmColor, defaultDwmColor);
-    if (SUCCEEDED(result)) captionWindow = nullptr;
-    return result;
+    return SUCCEEDED(setCaptionColors(target, colors, true)) || !captionStillOwned(target);
 }
 
-HRESULT enableCaption(const ThemeProfile& profile)
+DWORD captionFailure(HRESULT error, bool rolledBack)
 {
-    HWND window{};
-    if (!EnumWindows(findCaptionWindow, reinterpret_cast<LPARAM>(&window)) || !window)
-        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-    if (captionWindow != window) {
-        const HRESULT restored = restoreCaption();
-        if (FAILED(restored)) return restored;
+    if (rolledBack) return static_cast<DWORD>(error);
+    captionStateUncertain = true;
+    return themeStateUncertain;
+}
+
+DWORD transitionCaption(const CaptionTarget& next, CaptionColors colors)
+{
+    if (captionStateUncertain) return themeStateUncertain;
+    CaptionState previous = appliedCaption;
+    if (!captionStillOwned(previous.target)) previous = {};
+    const bool moved = previous.target != next;
+    if (previous.target.window && moved) {
+        const auto reset = setCaptionColors(previous.target, {});
+        if (FAILED(reset))
+            return captionFailure(reset, rollbackCaption(previous.target, previous.colors));
     }
-    const COLORREF background = toBgr(profile.colors[captionBackground]);
-    HRESULT result = DwmSetWindowAttribute(window, captionColorAttribute,
-                                           &background, sizeof(background));
-    if (FAILED(result)) return result;
-    captionWindow = window;
-    const COLORREF text = toBgr(profile.colors[captionText]);
-    result = DwmSetWindowAttribute(window, captionTextColorAttribute, &text, sizeof(text));
-    if (FAILED(result)) restoreCaption();
-    return result;
+    if (next.window) {
+        const auto set = setCaptionColors(next, colors);
+        if (FAILED(set)) {
+            // DWM exposes setters for these attributes. New stock windows start at defaults.
+            const bool resetNew = rollbackCaption(next, moved ? CaptionColors{} : previous.colors);
+            const bool resetOld = !previous.target.window || !moved ||
+                rollbackCaption(previous.target, previous.colors);
+            return captionFailure(set, resetNew && resetOld);
+        }
+    }
+    appliedCaption = {next, colors};
+    return ERROR_SUCCESS;
+}
+
+DWORD applyCaption(const ThemeProfile& profile, ULONG_PTR zones, const DesignerWindow& mainWindow)
+{
+    if (!(zones & enableTreeAndCaption)) return transitionCaption({}, {});
+    return transitionCaption(mainWindow, {toBgr(profile.colors[captionBackground]),
+                                          toBgr(profile.colors[captionText])});
 }
 
 DWORD replaceRgb(DWORD value, DWORD rgb)
@@ -292,8 +313,8 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     if (event.ExceptionCode != EXCEPTION_BREAKPOINT) return EXCEPTION_CONTINUE_SEARCH;
 
     auto& regs = *exception->ContextRecord;
-    const ULONG_PTR theme = activeTheme.load(std::memory_order_acquire);
-    const auto& colors = *activeProfile.load(std::memory_order_relaxed);
+    const auto& colors = *activeProfile.load(std::memory_order_acquire);
+    const ULONG_PTR theme = colors.zones;
     const bool dark = (theme & enableTreeOnly) != 0;
     const bool withLists = (theme & (enableTreeOnly | enableDropdown | enableSearchResults)) != 0;
     const bool withBars = (theme & enableTreeAndBars) != 0;
@@ -434,6 +455,8 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
+DWORD patchSites();
+
 DWORD installSites()
 {
     const auto frame = GetModuleHandleW(L"frame.dll");
@@ -476,8 +499,14 @@ DWORD installSites()
 
     const auto handler = AddVectoredExceptionHandler(1, onBreakpoint);
     if (!handler) return ERROR_INVALID_FUNCTION;
+    return patchSites();
+}
+
+DWORD patchSites()
+{
     size_t prepared = 0;
     DWORD error = ERROR_SUCCESS;
+    bool rollbackUncertain = false;
     for (size_t i = 0; i < installedSiteCount; ++i) {
         auto& site = sites[i];
         if (!VirtualProtect(site.address, 1, PAGE_EXECUTE_READWRITE, &site.protection)) {
@@ -487,21 +516,29 @@ DWORD installSites()
         ++prepared;
     }
     if (!error) {
+        size_t patched = 0;
         for (size_t i = 0; i < installedSiteCount; ++i) {
             auto& site = sites[i];
-            InterlockedExchange8(reinterpret_cast<volatile char*>(site.address),
-                                 static_cast<char>(0xCC));
+            const auto original = static_cast<char>(site.instruction.front());
+            if (_InterlockedCompareExchange8(reinterpret_cast<volatile char*>(site.address),
+                                             static_cast<char>(0xCC), original) != original) {
+                error = ERROR_INVALID_DATA;
+                break;
+            }
+            ++patched;
             if (!FlushInstructionCache(GetCurrentProcess(), site.address, 1)) {
                 error = GetLastError();
                 break;
             }
         }
         if (error) {
-            for (size_t i = 0; i < installedSiteCount; ++i) {
-                auto& site = sites[i];
-                InterlockedExchange8(reinterpret_cast<volatile char*>(site.address),
-                                     static_cast<char>(site.instruction.front()));
-                FlushInstructionCache(GetCurrentProcess(), site.address, 1);
+            while (patched) {
+                auto& site = sites[--patched];
+                constexpr auto breakpoint = static_cast<char>(0xCC);
+                if (_InterlockedCompareExchange8(reinterpret_cast<volatile char*>(site.address),
+                                                static_cast<char>(site.instruction.front()), breakpoint) != breakpoint ||
+                    !FlushInstructionCache(GetCurrentProcess(), site.address, 1))
+                    rollbackUncertain = true;
             }
         }
     }
@@ -509,26 +546,70 @@ DWORD installSites()
     while (prepared != 0) {
         auto& site = sites[--prepared];
         DWORD ignored{};
-        if (!VirtualProtect(site.address, 1, site.protection, &ignored) && !error)
-            error = GetLastError();
+        if (!VirtualProtect(site.address, 1, site.protection, &ignored))
+            rollbackUncertain = true;
     }
     // A thread may still be returning from a breakpoint after rollback.
     // Keep the handler and addresses valid for the lifetime of this session.
-    return error;
+    return rollbackUncertain ? themeStateUncertain : error;
 }
 
 DWORD applyProfile(const ThemeProfile& profile, ULONG_PTR zones)
 {
+    if (installationResult == themeStateUncertain || captionStateUncertain) return themeStateUncertain;
+    const DWORD pid = GetCurrentProcessId();
+    const auto mainWindow = zones ? findDesignerMainWindow(pid) : DesignerWindow{};
+    if (zones && !mainWindow.window) return ERROR_NOT_READY;
+    const ThemeProfile* snapshot = &disabledProfile;
+    size_t index{};
+    if (zones) {
+        while (index < profileCount && (profileHistory[index]->zones != zones ||
+                                        profileHistory[index]->colors != profile.colors)) ++index;
+        if (index == profileHistory.size()) return ERROR_NOT_ENOUGH_MEMORY;
+    }
     if (zones && (installationResult == ERROR_NOT_READY || installationResult == ERROR_MOD_NOT_FOUND))
         installationResult = installSites();
     if (zones && installationResult != ERROR_SUCCESS) return installationResult;
 
-    const HRESULT captionResult = (zones & enableTreeAndCaption) ? enableCaption(profile) : restoreCaption();
-    if (FAILED(captionResult)) return static_cast<DWORD>(captionResult);
-    activeProfile.store(&profile, std::memory_order_relaxed);
-    activeTheme.store(zones, std::memory_order_release);
+    if (zones && designerMainWindow(mainWindow.window, pid) != mainWindow) return ERROR_NOT_READY;
+    if (const auto captionResult = applyCaption(profile, zones, mainWindow)) {
+        if (captionResult == static_cast<DWORD>(HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE)))
+            return ERROR_NOT_READY;
+        return captionResult;
+    }
+    if (zones) {
+        if (index == profileCount) {
+            auto& entry = profileHistory[profileCount++].emplace(profile);
+            entry.zones = static_cast<DWORD>(zones);
+        }
+        snapshot = &*profileHistory[index];
+    }
+    activeProfile.store(snapshot, std::memory_order_release);
     return ERROR_SUCCESS;
 }
+
+bool inDesigner()
+{
+    static const bool designer = isDesignerCommandLine(GetCommandLineW());
+    return designer;
+}
+
+#ifndef THEME_BACKGROUND_ONLY
+bool copyThemeProfile(LPVOID setting, ThemeProfile& profile)
+{
+    if (!setting) return false;
+    __try {
+        const auto& supplied = *static_cast<const ThemeProfile*>(setting);
+        if (supplied.size != sizeof(ThemeProfile) || supplied.version != themeProfileVersion)
+            return false;
+        profile = supplied;
+        return profile.size == sizeof(ThemeProfile) && profile.version == themeProfileVersion;
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ?
+                EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        return false;
+    }
+}
+#endif
 
 } // namespace
 
@@ -537,31 +618,30 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
     const auto requested = reinterpret_cast<ULONG_PTR>(setting);
     if (requested & ~(static_cast<ULONG_PTR>(255) | enableSearchResults))
         return ERROR_INVALID_PARAMETER;
+    if (!inDesigner()) return ERROR_NOT_SUPPORTED;
     AcquireSRWLockExclusive(&installationLock);
-    const DWORD result = customApplied ? ERROR_ALREADY_ASSIGNED :
-        applyProfile(defaultProfile, requested ? requested | enableTreeOnly : 0);
+    const DWORD result = applyProfile(defaultProfile, requested ? requested | enableTreeOnly : 0);
     ReleaseSRWLockExclusive(&installationLock);
     return result;
 }
 
 #ifndef THEME_BACKGROUND_ONLY
+extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV5(LPVOID)
+{
+    return themeProfileVersion;
+}
+
 extern "C" __declspec(dllexport) DWORD WINAPI SetThemeProfile(LPVOID setting)
 {
-    if (!setting) return ERROR_INVALID_PARAMETER;
-    const auto& profile = *static_cast<const ThemeProfile*>(setting);
-    if (profile.size != sizeof(ThemeProfile) || profile.version != themeProfileVersion ||
-        profile.zones > themeZoneMask)
+    if (!inDesigner()) return ERROR_NOT_SUPPORTED;
+    ThemeProfile profile;
+    if (!copyThemeProfile(setting, profile) || profile.zones > themeZoneMask)
         return ERROR_INVALID_PARAMETER;
     for (const auto color : profile.colors) {
         if (color > rgbMask) return ERROR_INVALID_PARAMETER;
     }
     AcquireSRWLockExclusive(&installationLock);
-    DWORD result = ERROR_ALREADY_ASSIGNED;
-    if (!customApplied) {
-        customProfile = profile;
-        result = applyProfile(customProfile, profile.zones);
-        customApplied = result == ERROR_SUCCESS;
-    }
+    const DWORD result = applyProfile(profile, profile.zones);
     ReleaseSRWLockExclusive(&installationLock);
     return result;
 }

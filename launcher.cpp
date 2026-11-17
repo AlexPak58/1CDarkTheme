@@ -1,4 +1,5 @@
 #include "platform.hpp"
+#include "attach_process.hpp"
 #ifdef THEME_TOOLTIP_TRACE
 #include "tooltip_trace.hpp"
 #elif defined(THEME_FORM_LINE_TRACE)
@@ -20,10 +21,17 @@
 #if defined(THEME_TOOLTIP_TRACE) || defined(THEME_DOCUMENT_TRACE) || defined(THEME_SEARCH_RESULTS_TRACE)
 #define THEME_HAS_TRACE
 #endif
+#if !defined(THEME_HAS_TRACE) && !defined(THEME_BENCHMARK)
+#include "list_identity.hpp"
+#include <winternl.h>
+#include <algorithm>
+#include <vector>
+#endif
 
 #include <tlhelp32.h>
 #include <charconv>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <filesystem>
 #include <string_view>
@@ -66,7 +74,8 @@ DWORD remoteCall(HANDLE child, ULONG_PTR address, LPVOID arg, DWORD& result)
         reinterpret_cast<LPTHREAD_START_ROUTINE>(address), arg, 0, nullptr));
     if (!static_cast<HANDLE>(worker)) return GetLastError();
     if (WaitForSingleObject(worker, 30000) != WAIT_OBJECT_0) return WAIT_TIMEOUT;
-    return GetExitCodeThread(worker, &result) ? ERROR_SUCCESS : GetLastError();
+    // A started call with an unknown outcome must not be retried as a transport failure.
+    return GetExitCodeThread(worker, &result) ? ERROR_SUCCESS : WAIT_TIMEOUT;
 }
 
 DWORD themeExportRva(const std::wstring& dll, const char* exportName, ULONG_PTR& exportRva)
@@ -277,22 +286,24 @@ bool parseProfile(std::wstring_view input, ThemeProfile& profile)
     return true;
 }
 
-struct ProfileWindow {
-    DWORD pid;
-    HWND window;
-};
-
-BOOL CALLBACK findProfileWindow(HWND window, LPARAM param)
+#if !defined(THEME_HAS_TRACE) && !defined(THEME_BENCHMARK)
+DWORD lockLaunchedTheme(HANDLE child, DWORD pid, ThemeProcessLock& targetLock)
 {
-    auto& target = *reinterpret_cast<ProfileWindow*>(param);
-    DWORD pid{};
-    GetWindowThreadProcessId(window, &pid);
-    if (pid != target.pid || !IsWindowVisible(window) || GetWindow(window, GW_OWNER) ||
-        (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) ||
-        (GetWindowLongPtrW(window, GWL_STYLE) & WS_CAPTION) != WS_CAPTION) return TRUE;
-    target.window = window;
-    return FALSE;
+    ULONGLONG creation{};
+    if (const auto error = readProcessCreation(child, creation)) return error;
+    const auto lockResult = targetLock.acquire(pid, creation);
+    if (lockResult == WAIT_ABANDONED) return themeStateUncertain;
+    if (lockResult == WAIT_TIMEOUT) return ERROR_RETRY;
+    if (lockResult) return lockResult;
+    return checkProcessLifetime(child, creation);
 }
+
+DWORD loadLaunchedTheme(HANDLE child, DWORD pid, const std::wstring& dll, ULONG_PTR& setter,
+                        const char* exportName);
+#else
+DWORD lockLaunchedTheme(HANDLE, DWORD, ThemeProcessLock&) { return ERROR_SUCCESS; }
+constexpr auto loadLaunchedTheme = loadTheme;
+#endif
 
 int applyLaunchProfile(HANDLE child, DWORD pid, const std::wstring& dll, const ThemeProfile& profile)
 {
@@ -310,11 +321,14 @@ int applyLaunchProfile(HANDLE child, DWORD pid, const std::wstring& dll, const T
             error = ERROR_PROCESS_ABORTED;
             break;
         }
-        ProfileWindow target{pid, nullptr};
-        EnumWindows(findProfileWindow, reinterpret_cast<LPARAM>(&target));
+        const auto target = findDesignerMainWindow(pid);
         if (target.window) {
-            error = setter ? ERROR_SUCCESS : loadTheme(child, pid, dll, setter, "SetThemeProfile");
-            if (error && error != ERROR_MOD_NOT_FOUND) break;
+            ThemeProcessLock targetLock;
+            error = lockLaunchedTheme(child, pid, targetLock);
+            if (error == ERROR_RETRY) error = ERROR_MOD_NOT_FOUND;
+            if (!error && !findDesignerMainWindow(pid).window) error = ERROR_MOD_NOT_FOUND;
+            if (!error && !setter) error = loadLaunchedTheme(child, pid, dll, setter, "SetThemeProfile");
+            if (error && error != ERROR_MOD_NOT_FOUND && error != ERROR_NOT_READY) break;
             if (!error && !payload) {
                 payload = VirtualAllocEx(child, nullptr, sizeof(profile), MEM_RESERVE | MEM_COMMIT,
                                          PAGE_READWRITE);
@@ -323,12 +337,16 @@ int applyLaunchProfile(HANDLE child, DWORD pid, const std::wstring& dll, const T
                     break;
                 }
             }
-            if (payload) {
+            if (!error && payload) {
                 error = remoteCall(child, setter, payload, result);
                 if (error) break;
-                if (result != ERROR_MOD_NOT_FOUND && result != static_cast<DWORD>(HRESULT_FROM_WIN32(ERROR_NOT_FOUND))) {
-                    if (!result) RedrawWindow(target.window, nullptr, nullptr,
-                        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                if (result != ERROR_MOD_NOT_FOUND && result != ERROR_NOT_READY &&
+                    result != static_cast<DWORD>(HRESULT_FROM_WIN32(ERROR_NOT_FOUND))) {
+                    if (!result) {
+                        const auto window = findDesignerMainWindow(pid).window;
+                        if (window) RedrawWindow(window, nullptr, nullptr,
+                            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                    }
                     break;
                 }
             }
@@ -349,6 +367,336 @@ int applyLaunchProfile(HANDLE child, DWORD pid, const std::wstring& dll, const T
     std::puts("Theme profile applied.");
     return 0;
 }
+
+#if !defined(THEME_HAS_TRACE) && !defined(THEME_BENCHMARK)
+bool pathEqual(const std::wstring& left, const wchar_t* right)
+{
+    return CompareStringOrdinal(left.c_str(), -1, right, -1, TRUE) == CSTR_EQUAL;
+}
+
+enum class AttachStatus { Applied, Disabled, Error, InvalidArgument, NotReady, Stale,
+                          Unsupported, Conflict, Ambiguous };
+
+int attachResult(AttachStatus status, DWORD win32 = ERROR_SUCCESS, DWORD dll = ERROR_SUCCESS)
+{
+    constexpr struct { const char* token; int exitCode; } results[] = {
+        {"applied", 0}, {"disabled", 0}, {"error", 1}, {"invalid_argument", 2},
+        {"not_ready", 3}, {"stale", 4}, {"unsupported", 5}, {"conflict", 6}, {"ambiguous", 7},
+    };
+    const auto result = results[static_cast<size_t>(status)];
+    std::printf("{\"status\":\"%s\",\"win32\":%lu,\"dll\":%lu}\n", result.token, win32, dll);
+    return result.exitCode;
+}
+
+template<class T>
+bool parseDecimal(std::wstring_view input, T& result)
+{
+    if (input.empty()) return false;
+    result = 0;
+    for (const auto ch : input) {
+        if (ch < L'0' || ch > L'9') return false;
+        const auto digit = static_cast<T>(ch - L'0');
+        if (result > (std::numeric_limits<T>::max() - digit) / 10) return false;
+        result = result * 10 + digit;
+    }
+    return result != 0;
+}
+
+DWORD readProcessCommandLine(HANDLE process, std::wstring& commandLine)
+{
+    const auto ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return ERROR_MOD_NOT_FOUND;
+    using Query = NTSTATUS (NTAPI*)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+    using ToError = ULONG (NTAPI*)(NTSTATUS);
+    const auto query = reinterpret_cast<Query>(GetProcAddress(ntdll, "NtQueryInformationProcess"));
+    const auto toError = reinterpret_cast<ToError>(GetProcAddress(ntdll, "RtlNtStatusToDosError"));
+    if (!query || !toError) return ERROR_NOT_SUPPORTED;
+
+    // ProcessCommandLineInformation writes one counted string into this caller's buffer.
+    constexpr ULONG capacity = 128 * 1024;
+    std::vector<ULONG_PTR> buffer(capacity / sizeof(ULONG_PTR));
+    ULONG returned{};
+    const auto status = query(process, static_cast<PROCESSINFOCLASS>(60), buffer.data(),
+                              capacity, &returned);
+    if (status < 0) return toError(status);
+    if (returned < sizeof(UNICODE_STRING) || returned > capacity) return ERROR_INVALID_DATA;
+    UNICODE_STRING argument{};
+    std::memcpy(&argument, buffer.data(), sizeof(argument));
+    const ULONG_PTR start = reinterpret_cast<ULONG_PTR>(buffer.data());
+    const ULONG_PTR end = start + returned;
+    const ULONG_PTR text = reinterpret_cast<ULONG_PTR>(argument.Buffer);
+    if (!argument.Length || argument.Length % sizeof(wchar_t) ||
+        argument.Length > argument.MaximumLength || text % alignof(wchar_t) ||
+        text < start + sizeof(argument) || text > end || argument.Length > end - text)
+        return ERROR_INVALID_DATA;
+    commandLine.assign(argument.Buffer, argument.Length / sizeof(wchar_t));
+    return commandLine.find(L'\0') == std::wstring::npos ? ERROR_SUCCESS : ERROR_INVALID_DATA;
+}
+
+DWORD validateDesigner(HANDLE process, DWORD pid, std::wstring& path)
+{
+    DWORD ourSession{}, theirSession{};
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &ourSession) ||
+        !ProcessIdToSessionId(pid, &theirSession)) return GetLastError();
+    if (ourSession != theirSession) return ERROR_NOT_SUPPORTED;
+    USHORT processMachine{}, nativeMachine{};
+    if (!IsWow64Process2(process, &processMachine, &nativeMachine)) return GetLastError();
+    if (processMachine != IMAGE_FILE_MACHINE_UNKNOWN || nativeMachine != IMAGE_FILE_MACHINE_AMD64)
+        return ERROR_NOT_SUPPORTED;
+    path.resize(32768);
+    auto length = static_cast<DWORD>(path.size());
+    if (!QueryFullProcessImageNameW(process, 0, path.data(), &length)) return GetLastError();
+    path.resize(length);
+    const auto name = path.find_last_of(L"\\/");
+    if (name == std::wstring::npos ||
+        CompareStringOrdinal(path.c_str() + name + 1, -1, L"1cv8.exe", -1, TRUE) != CSTR_EQUAL ||
+        !matchesSha256(path, exeHash)) return ERROR_REVISION_MISMATCH;
+    std::wstring commandLine;
+    const auto error = readProcessCommandLine(process, commandLine);
+    if (error) return error;
+    return isDesignerCommandLine(commandLine.c_str()) ? ERROR_SUCCESS : ERROR_NOT_SUPPORTED;
+}
+
+struct AttachModules {
+    ULONG_PTR ownBase{};
+    DWORD ownSize{};
+    bool competingDll{};
+    std::wstring frame;
+    std::wstring graphics;
+    std::wstring frontend;
+};
+
+DWORD snapshotAttachModules(DWORD pid, const std::wstring& dll, AttachModules& modules)
+{
+    modules = {};
+    const Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid));
+    if (static_cast<HANDLE>(snapshot) == INVALID_HANDLE_VALUE) return GetLastError();
+    MODULEENTRY32W item{};
+    item.dwSize = sizeof(item);
+    if (!Module32FirstW(snapshot, &item)) return GetLastError();
+    do {
+        if (pathEqual(L"tree-theme.dll", item.szModule)) {
+            if (pathEqual(dll, item.szExePath)) {
+                modules.ownBase = reinterpret_cast<ULONG_PTR>(item.modBaseAddr);
+                modules.ownSize = item.modBaseSize;
+            } else {
+                modules.competingDll = true;
+            }
+        } else if (pathEqual(L"frame.dll", item.szModule)) {
+            modules.frame = item.szExePath;
+        } else if (pathEqual(L"grphcs.dll", item.szModule)) {
+            modules.graphics = item.szExePath;
+        } else if (pathEqual(L"frntend.dll", item.szModule)) {
+            modules.frontend = item.szExePath;
+        }
+    } while (Module32NextW(snapshot, &item));
+    const auto error = GetLastError();
+    return error == ERROR_NO_MORE_FILES ? ERROR_SUCCESS : error;
+}
+
+class AttachImage {
+    HMODULE image_;
+    DWORD size_{};
+    DWORD headers_{};
+    IMAGE_DATA_DIRECTORY exports_{};
+    ULONG_PTR setter_{};
+public:
+    explicit AttachImage(const std::wstring& path)
+        : image_(LoadLibraryExW(path.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES)) {}
+    ~AttachImage() { if (image_) FreeLibrary(image_); }
+    AttachImage(const AttachImage&) = delete;
+    AttachImage& operator=(const AttachImage&) = delete;
+
+    bool validate(const char* exportName = "SetThemeProfile")
+    {
+        if (!image_) return false;
+        const auto base = reinterpret_cast<ULONG_PTR>(image_);
+        const auto& dos = *reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        if (dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew < sizeof(dos) ||
+            dos.e_lfanew > 4096 - sizeof(IMAGE_NT_HEADERS64)) return false;
+        const auto& nt = *reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos.e_lfanew);
+        if (nt.Signature != IMAGE_NT_SIGNATURE || nt.FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+            !(nt.FileHeader.Characteristics & IMAGE_FILE_DLL) ||
+            nt.FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64) ||
+            nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
+            nt.OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT) return false;
+        const auto& optional = nt.OptionalHeader;
+        size_ = optional.SizeOfImage;
+        headers_ = optional.SizeOfHeaders;
+        exports_ = optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if (!headers_ || headers_ > 65536 || headers_ > size_ ||
+            exports_.Size < sizeof(IMAGE_EXPORT_DIRECTORY) || exports_.Size > 65536 ||
+            !exports_.VirtualAddress || exports_.VirtualAddress >= size_ ||
+            exports_.Size > size_ - exports_.VirtualAddress) return false;
+        const auto executableExport = [&](const char* name) {
+            const auto code = reinterpret_cast<ULONG_PTR>(GetProcAddress(image_, name));
+            MEMORY_BASIC_INFORMATION region{};
+            if (code < base || code - base >= size_ ||
+                !VirtualQuery(reinterpret_cast<LPCVOID>(code), &region, sizeof(region)) ||
+                region.AllocationBase != image_ || !(region.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                    PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return ULONG_PTR{0};
+            return code - base;
+        };
+        setter_ = executableExport(exportName);
+        return setter_ && executableExport(themeProfileAttachExport);
+    }
+
+    ULONG_PTR remoteSetter(HANDLE process, const AttachModules& modules) const
+    {
+        if (!modules.ownBase || modules.ownSize != size_) return 0;
+        const auto base = reinterpret_cast<ULONG_PTR>(image_);
+        MEMORY_BASIC_INFORMATION region{};
+        if (!VirtualQueryEx(process, reinterpret_cast<LPCVOID>(modules.ownBase + setter_),
+                            &region, sizeof(region)) ||
+            reinterpret_cast<ULONG_PTR>(region.AllocationBase) != modules.ownBase ||
+            region.Type != MEM_IMAGE || !(region.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return 0;
+        std::vector<BYTE> bytes((std::max)(headers_, exports_.Size));
+        const auto same = [&](DWORD offset, DWORD count) {
+            SIZE_T read{};
+            return ReadProcessMemory(process, reinterpret_cast<LPCVOID>(modules.ownBase + offset),
+                                     bytes.data(), count, &read) && read == count &&
+                   std::memcmp(bytes.data(), reinterpret_cast<const void*>(base + offset), count) == 0;
+        };
+        return same(0, headers_) && same(exports_.VirtualAddress, exports_.Size) ?
+            modules.ownBase + setter_ : 0;
+    }
+};
+
+DWORD loadLaunchedTheme(HANDLE child, DWORD pid, const std::wstring& dll, ULONG_PTR& setter,
+                        const char* exportName)
+{
+    if (!findDesignerMainWindow(pid).window) return ERROR_NOT_READY;
+    AttachModules modules;
+    if (const auto error = snapshotAttachModules(pid, dll, modules)) return error;
+    if (modules.competingDll) return ERROR_ALREADY_EXISTS;
+    if (!modules.ownBase) return loadTheme(child, pid, dll, setter, exportName);
+    const Handle imageFile(CreateFileW(dll.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (static_cast<HANDLE>(imageFile) == INVALID_HANDLE_VALUE) return GetLastError();
+    AttachImage image(dll);
+    if (!image.validate(exportName)) return ERROR_REVISION_MISMATCH;
+    setter = image.remoteSetter(child, modules);
+    return setter ? ERROR_SUCCESS : ERROR_REVISION_MISMATCH;
+}
+
+int attachError(HANDLE process, ULONGLONG creation, DWORD error)
+{
+    if (checkProcessLifetime(process, creation) == ERROR_PROCESS_ABORTED ||
+        error == ERROR_PROCESS_ABORTED) return attachResult(AttachStatus::Stale, ERROR_PROCESS_ABORTED);
+    if (error == ERROR_BAD_LENGTH || error == ERROR_NO_MORE_FILES || error == ERROR_MOD_NOT_FOUND)
+        return attachResult(AttachStatus::NotReady, error);
+    if (error == ERROR_NOT_SUPPORTED || error == ERROR_REVISION_MISMATCH)
+        return attachResult(AttachStatus::Unsupported, error);
+    return attachResult(AttachStatus::Error, error);
+}
+
+int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile)
+{
+    const Handle query(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
+    if (!static_cast<HANDLE>(query)) {
+        const auto error = GetLastError();
+        return attachResult(error == ERROR_INVALID_PARAMETER ? AttachStatus::Stale :
+                            AttachStatus::Error, error);
+    }
+    if (const auto error = checkProcessLifetime(query, creation)) return attachError(query, creation, error);
+    std::wstring exe;
+    if (const auto error = validateDesigner(query, pid, exe)) return attachError(query, creation, error);
+
+    ThemeProcessLock targetLock;
+    const auto lockResult = targetLock.acquire(pid, creation);
+    if (lockResult == WAIT_ABANDONED) return attachResult(AttachStatus::Ambiguous, lockResult);
+    if (lockResult == WAIT_TIMEOUT) return attachResult(AttachStatus::NotReady, lockResult);
+    if (lockResult) return attachError(query, creation, lockResult);
+
+    const auto directory = std::filesystem::path(modulePath(nullptr)).parent_path();
+    if (directory.empty()) return attachResult(AttachStatus::Error, ERROR_PATH_NOT_FOUND);
+    const auto dll = (directory / L"tree-theme.dll").wstring();
+    AttachModules modules;
+    if (const auto error = snapshotAttachModules(pid, dll, modules)) return attachError(query, creation, error);
+    if (const auto error = checkProcessLifetime(query, creation)) return attachError(query, creation, error);
+    if (modules.competingDll) return attachResult(AttachStatus::Conflict, ERROR_ALREADY_EXISTS);
+    if (!profile.zones && !modules.ownBase) return attachResult(AttachStatus::Disabled);
+    if (profile.zones && !findDesignerMainWindow(pid).window)
+        return attachResult(AttachStatus::NotReady, ERROR_NOT_READY);
+
+    // Retain read access without sharing replacement or writes through validation and injection.
+    const Handle imageFile(CreateFileW(dll.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (static_cast<HANDLE>(imageFile) == INVALID_HANDLE_VALUE)
+        return attachResult(AttachStatus::Unsupported, GetLastError());
+    AttachImage image(dll);
+    if (!image.validate()) return attachResult(AttachStatus::Unsupported, ERROR_REVISION_MISMATCH);
+
+    constexpr DWORD rights = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | SYNCHRONIZE |
+                             PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE;
+    const Handle process(OpenProcess(rights, FALSE, pid));
+    if (!static_cast<HANDLE>(process)) return attachError(query, creation, GetLastError());
+    if (const auto error = checkProcessLifetime(process, creation)) return attachError(process, creation, error);
+    std::wstring reopenedExe;
+    if (const auto error = validateDesigner(process, pid, reopenedExe)) return attachError(process, creation, error);
+    if (!pathEqual(exe, reopenedExe.c_str())) return attachResult(AttachStatus::Stale, ERROR_PROCESS_ABORTED);
+    if (const auto error = snapshotAttachModules(pid, dll, modules)) return attachError(process, creation, error);
+    if (modules.competingDll) return attachResult(AttachStatus::Conflict, ERROR_ALREADY_EXISTS);
+    if (!profile.zones && !modules.ownBase) return attachResult(AttachStatus::Disabled);
+    if (modules.frame.empty() || modules.graphics.empty() || modules.frontend.empty())
+        return attachError(process, creation, ERROR_MOD_NOT_FOUND);
+    if (!matchesSha256(modules.frame, frameHash) || !matchesSha256(modules.graphics, graphicsHash) ||
+        !matchesSha256(modules.frontend, listFrontendHash))
+        return attachResult(AttachStatus::Unsupported, ERROR_REVISION_MISMATCH);
+    if (const auto error = checkProcessLifetime(process, creation)) return attachError(process, creation, error);
+    if (profile.zones && !findDesignerMainWindow(pid).window)
+        return attachResult(AttachStatus::NotReady, ERROR_NOT_READY);
+
+    if (!modules.ownBase) {
+        ULONG_PTR unusedSetter{};
+        const auto loadError = loadTheme(process, pid, dll, unusedSetter, "SetThemeProfile");
+        if (loadError == WAIT_TIMEOUT || loadError == ERROR_DLL_INIT_FAILED)
+            return attachResult(AttachStatus::Ambiguous, loadError);
+        if (loadError) return attachError(process, creation, loadError);
+        if (const auto error = snapshotAttachModules(pid, dll, modules))
+            return attachResult(AttachStatus::Ambiguous, error);
+        if (modules.competingDll) return attachResult(AttachStatus::Conflict, ERROR_ALREADY_EXISTS);
+    }
+    const auto setter = image.remoteSetter(process, modules);
+    if (!setter) return attachResult(AttachStatus::Unsupported, ERROR_REVISION_MISMATCH);
+    if (const auto error = checkProcessLifetime(process, creation)) return attachError(process, creation, error);
+    const auto payload = VirtualAllocEx(process, nullptr, sizeof(profile), MEM_RESERVE | MEM_COMMIT,
+                                        PAGE_READWRITE);
+    if (!payload) return attachError(process, creation, GetLastError());
+    DWORD result{};
+    const DWORD error = WriteProcessMemory(process, payload, &profile, sizeof(profile), nullptr) ?
+        remoteCall(process, setter, payload, result) : GetLastError();
+    if (error != WAIT_TIMEOUT) VirtualFreeEx(process, payload, 0, MEM_RELEASE);
+    if (error == WAIT_TIMEOUT) return attachResult(AttachStatus::Ambiguous, error);
+    if (error) return attachError(process, creation, error);
+    if (result == themeStateUncertain) return attachResult(AttachStatus::Ambiguous, ERROR_SUCCESS, result);
+    if (result == ERROR_MOD_NOT_FOUND || result == ERROR_NOT_READY ||
+        result == static_cast<DWORD>(HRESULT_FROM_WIN32(ERROR_NOT_FOUND)))
+        return attachResult(AttachStatus::NotReady, ERROR_SUCCESS, result);
+    if (result == ERROR_NOT_SUPPORTED || result == ERROR_REVISION_MISMATCH)
+        return attachResult(AttachStatus::Unsupported, ERROR_SUCCESS, result);
+    if (result) return attachResult(AttachStatus::Error, ERROR_SUCCESS, result);
+    if (const auto lifetimeError = checkProcessLifetime(process, creation))
+        return attachError(process, creation, lifetimeError);
+    const auto target = findDesignerMainWindow(pid);
+    if (target.window && !checkProcessLifetime(process, creation))
+        RedrawWindow(target.window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    return attachResult(profile.zones ? AttachStatus::Applied : AttachStatus::Disabled);
+}
+
+int attachCommand(int argc, wchar_t** argv)
+{
+    DWORD pid{};
+    ULONGLONG creation{};
+    ThemeProfile profile;
+    if (argc != 6 || std::wstring_view(argv[4]) != L"--palette" ||
+        !parseDecimal(argv[2], pid) || !parseDecimal(argv[3], creation) ||
+        !parseProfile(argv[5], profile))
+        return attachResult(AttachStatus::InvalidArgument, ERROR_INVALID_PARAMETER);
+    return attachToDesigner(pid, creation, profile);
+}
+#endif
 
 #ifdef THEME_BENCHMARK
 struct BenchmarkWindow {
@@ -410,6 +758,17 @@ bool benchmark(HANDLE child, DWORD pid)
 
 int wmain(int argc, wchar_t** argv)
 {
+#if !defined(THEME_HAS_TRACE) && !defined(THEME_BENCHMARK)
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--attach") {
+        try {
+            return attachCommand(argc, argv);
+        } catch (const std::bad_alloc&) {
+            return attachResult(AttachStatus::Error, ERROR_NOT_ENOUGH_MEMORY);
+        } catch (const std::exception&) {
+            return attachResult(AttachStatus::Error, ERROR_GEN_FAILURE);
+        }
+    }
+#endif
 #ifdef THEME_SPREADSHEET_TRACE
     const bool designer = argc == 4 && std::wstring_view(argv[3]) == L"--designer";
     if (designer) --argc;
@@ -455,7 +814,11 @@ int wmain(int argc, wchar_t** argv)
         std::fputs("Usage: tree-theme-run.exe <1cv8.exe> <server\\ref>"
                    " [--caption] [--bars] [--properties] [--workspace] [--status-bar]"
                    " [--window-tabs] [--tree-tabs] [--search-results]\n"
-                   "       tree-theme-run.exe <1cv8.exe> <server\\ref> --palette <mask>:<RGB,...>\n", stderr);
+                   "       tree-theme-run.exe <1cv8.exe> <server\\ref> --palette <mask>:<RGB,...>\n"
+#if !defined(THEME_HAS_TRACE) && !defined(THEME_BENCHMARK)
+                   "       tree-theme-run.exe --attach <pid> <creation-filetime> --palette <mask>:<RGB,...>\n"
+#endif
+                   , stderr);
         return 2;
     }
     if (!selection) selection = enableTreeOnly;
@@ -560,8 +923,10 @@ int wmain(int argc, wchar_t** argv)
             std::fflush(stdout);
             continue;
         }
-        DWORD error = setter ? ERROR_SUCCESS :
-            loadTheme(child, process.dwProcessId, dll, setter, "SetTreeTheme");
+        ThemeProcessLock targetLock;
+        DWORD error = lockLaunchedTheme(child, process.dwProcessId, targetLock);
+        if (!error && !setter)
+            error = loadLaunchedTheme(child, process.dwProcessId, dll, setter, "SetTreeTheme");
         DWORD result{};
         if (!error) {
             const auto setting = action == 'e' ? reinterpret_cast<LPVOID>(selection) : nullptr;
@@ -589,8 +954,10 @@ int wmain(int argc, wchar_t** argv)
         std::fflush(stdout);
     }
     if (setter && WaitForSingleObject(child, 0) == WAIT_TIMEOUT) {
+        ThemeProcessLock targetLock;
         DWORD result{};
-        const DWORD error = remoteCall(child, setter, nullptr, result);
+        DWORD error = lockLaunchedTheme(child, process.dwProcessId, targetLock);
+        if (!error) error = remoteCall(child, setter, nullptr, result);
         if (error || result) {
             std::fprintf(stderr, "Disabling theme failed: transport=%lu dll=%lu\n", error, result);
             return 1;

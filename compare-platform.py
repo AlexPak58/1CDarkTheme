@@ -159,6 +159,46 @@ def fill_candidates(rva, code, rgba_calls):
                    "callee": f"0x{callee:X}", "rgba_call": f"0x{rgba_call:X}"}
 
 
+def spreadsheet_rectangle_cairo_candidates(rva, code, cairo_imports):
+    # The rectangle dispatch forwards x/y/width and loads height from its caller's stack.
+    dispatch = re.compile(rb"\x89\x44\x24\x20\x44\x8b\x8c\x24[\x80\x90]\x00\x00\x00"
+                          rb"\x44\x8b\xc6\x8b\xd5\xe8(.{4})", re.S)
+    for match in dispatch.finditer(code):
+        helper = match.end() + struct.unpack("<i", match[1])[0]
+        rectangle = helper + 0xDD
+        fill_call = rectangle + 0x1A
+        if helper < 0 or fill_call + 5 > len(code) or code[rectangle:rectangle + 2] != b"\xff\x15":
+            continue
+        slot = rva + rectangle + 6 + struct.unpack_from("<i", code, rectangle + 2)[0]
+        if cairo_imports.get(slot) != "cairo_rectangle" or code[fill_call] != 0xE8:
+            continue
+        fill = fill_call + 5 + struct.unpack_from("<i", code, fill_call + 1)[0]
+        color_call = fill + 0x71
+        if (fill < 0 or color_call + 5 > len(code) or
+                code[color_call - 6:color_call + 1] != b"\x48\x8b\xcf\x0f\x45\xd0\xe8"):
+            continue
+        converter = color_call + 5 + struct.unpack_from("<i", code, color_call + 1)[0]
+        rgb_jump = converter + 0xC0
+        mask_call = converter + 0x53
+        if (converter < 0 or rgb_jump + 7 > len(code) or
+                code[rgb_jump:rgb_jump + 3] != b"\x48\xff\x25" or
+                code[mask_call:mask_call + 2] != b"\xff\x15"):
+            continue
+        rgb_slot = rva + rgb_jump + 7 + struct.unpack_from("<i", code, rgb_jump + 3)[0]
+        rgba_slot = rva + mask_call + 6 + struct.unpack_from("<i", code, mask_call + 2)[0]
+        if (cairo_imports.get(rgb_slot) != "cairo_set_source_rgb" or
+                cairo_imports.get(rgba_slot) != "cairo_set_source_rgba"):
+            continue
+        yield {
+            "rectangle_iat": f"0x{slot:X}",
+            "rectangle_return": f"0x{rva + rectangle + 6:X}",
+            "dispatch_return": f"0x{rva + match.end():X}",
+            "fill_return": f"0x{rva + fill_call + 5:X}",
+            "solid_color_return": f"0x{rva + color_call + 5:X}",
+            "solid_mask_return": f"0x{rva + mask_call + 6:X}",
+        }
+
+
 def text_color_candidates(image, rva, code, rgba_calls, font_calls, fill_calls):
     ranges = list(image.function_ranges())
     # The two callers step over original glyph runs and temporary fragments, respectively.
@@ -660,9 +700,11 @@ def compare(directory, signatures):
                 image, rva, code, windows["search_label_render"]))
             summary["search_grid_candidates"] = list(search_grid_candidates(image, rva, code))
         elif name == "grphcs.dll":
-            imports = {slot: symbol for dll, symbol, slot in image.imports()
-                       if dll == "cairo.dll"
-                       and symbol in CAIRO_COLORS | {"cairo_set_scaled_font", "cairo_fill"}}
+            cairo_imports = {slot: symbol for dll, symbol, slot in image.imports() if dll == "cairo.dll"}
+            imports = {slot: symbol for slot, symbol in cairo_imports.items()
+                       if symbol in CAIRO_COLORS | {"cairo_set_scaled_font", "cairo_fill"}}
+            summary["spreadsheet_rectangle_cairo_candidates"] = list(
+                spreadsheet_rectangle_cairo_candidates(rva, code, cairo_imports))
             summary["cairo_imports"] = {symbol: f"0x{slot:X}" for slot, symbol in imports.items()
                                         if symbol in CAIRO_COLORS}
             # Opcode candidates only. Confirm instruction boundaries with a disassembler.

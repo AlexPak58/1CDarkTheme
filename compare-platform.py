@@ -486,6 +486,51 @@ def spreadsheet_view_grid_candidates(image):
                 }
 
 
+def spreadsheet_grid_strip_candidates(image):
+    rva, code = image.text()
+    # The setter copies ShowGrid from view settings into this+disp32.
+    # Its this pointer addresses the +0x240 subobject of the view.
+    setter = rb"\x41\x0f\xb6\x45\x30\x88\x86(.{4})\x41\x0f\xb6\x45\x32"
+    for write in re.finditer(setter, code, re.DOTALL):
+        flag = struct.unpack("<I", write[1])[0] + 0x240
+        guard = (rb"\x48\x8b\x47(?P<view>[\x40\x68])\x80\xb8"
+                 + re.escape(struct.pack("<I", flag))
+                 + rb"\x00\x0f\x84(?P<skip>.{4})")
+        # The horizontal call passes height=1 and the vertical call width=1.
+        # Both pass PATCOPY and use the same field in the paint object.
+        strips = re.compile(
+            guard
+            + rb".{19}\x48\x8b\x0d(?P<h_cache>.{4}).{11}"
+              rb"\x48\x8b\x57(?P<context>[\x50\x78]).{8}"
+              rb"\xc7\x44\x24\x30\x21\x00\xf0\x00\x41\xff\xc8"
+              rb"\xc7\x44\x24\x28\x01\x00\x00\x00\x89\x44\x24\x20"
+              rb"(?P<h_call>\x41\xff\x92(?P<slot>\xe8\x01|\x08\x02)\x00\x00)"
+              rb".{19}\x48\x8b\x0d(?P<v_cache>.{4}).{10}"
+              rb"\x48\x8b\x57(?P=context).{8}"
+              rb"\xc7\x44\x24\x30\x21\x00\xf0\x00\x41\xff\xc8"
+              rb"\x89\x44\x24\x28\xc7\x44\x24\x20\x01\x00\x00\x00"
+              rb"(?P<v_call>\x41\xff\x92(?P=slot)\x00\x00)",
+            re.DOTALL,
+        )
+        for match in strips.finditer(code):
+            horizontal_cache = match.end("h_cache") + struct.unpack("<i", match["h_cache"])[0]
+            vertical_cache = match.end("v_cache") + struct.unpack("<i", match["v_cache"])[0]
+            skip_target = match.end("skip") + struct.unpack("<i", match["skip"])[0]
+            if horizontal_cache != vertical_cache or skip_target != match.end("v_call"):
+                continue
+            yield {
+                "show_grid_write": f"0x{rva + write.start() + 5:X}",
+                "show_grid_check": f"0x{rva + match.start() + 4:X}",
+                "flag_offset": f"0x{flag:X}",
+                "view_offset": f"0x{match['view'][0]:X}",
+                "context_offset": f"0x{match['context'][0]:X}",
+                "graphics_cache": f"0x{rva + horizontal_cache:X}",
+                "graphics_slot": f"0x{struct.unpack('<H', match['slot'])[0]:X}",
+                "horizontal_return": f"0x{rva + match.end('h_call'):X}",
+                "vertical_return": f"0x{rva + match.end('v_call'):X}",
+            }
+
+
 def compare(directory, signatures):
     result = {"directory": str(directory), "clients": [], "modules": {}}
     for name in ("1cv8.exe", "1cv8c.exe"):
@@ -540,6 +585,13 @@ def compare(directory, signatures):
         result["modules"]["moxel.dll"] = {
             "sha256": image.sha256(),
             "spreadsheet_view_grid_candidates": list(spreadsheet_view_grid_candidates(image)),
+        }
+    path = directory / "moxelui.dll"
+    if path.is_file():
+        image = Image(path)
+        result["modules"]["moxelui.dll"] = {
+            "sha256": image.sha256(),
+            "spreadsheet_grid_strip_candidates": list(spreadsheet_grid_strip_candidates(image)),
         }
     return result
 

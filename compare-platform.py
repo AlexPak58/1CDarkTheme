@@ -504,16 +504,31 @@ def search_grid_alternating_palette(rva, code, ranges, after_resolve, method_end
         updater_end = ranges.get(updater, 0)
         if not rva <= updater < updater_end <= rva + len(code):
             continue
-        matches = list(pair.finditer(code, updater - rva, updater_end - rva))
+        body = code[updater - rva:updater_end - rva]
+        matches = list(pair.finditer(body))
         if len(matches) != 2:
             continue
+        white_store = bytes((0x41, 0xC7, 0x47, white, 0xFF, 0xFF, 0xFF, 0))
+        alternate_store = (bytes.fromhex("41 C7 47 74") if white == 0x70
+                           else bytes.fromhex("41 C7 87 80 00 00 00"))
+        cached_sites = {match.start() for match in matches}
+        other_white_writes = []
+        for store in re.finditer(re.escape(white_store), body):
+            if store.start() in cached_sites:
+                continue
+            writes_fafafa = body.startswith(alternate_store + b"\xfa\xfa\xfa\0", store.end())
+            other_white_writes.append({
+                "site": f"0x{updater + store.start():X}",
+                "adjacent_fafafa_write": writes_fafafa,
+            })
         return {
             "cache_offset": f"0x{struct.unpack('<I', cache[1])[0]:X}",
             "cache_write": f"0x{after_resolve + cache.start(1) - 3:X}",
             "palette_receiver_offset": f"0x{struct.unpack('<I', call[1])[0]:X}",
             "palette_updater": f"0x{updater:X}",
             "palette_call": f"0x{after_resolve + call.start(2) - 1:X}",
-            "fixed_white_writes": [f"0x{rva + match.start():X}" for match in matches],
+            "fixed_white_writes": [f"0x{updater + match.start():X}" for match in matches],
+            "other_white_writes": other_white_writes,
             "white_offset": f"0x{white:X}",
             "alternating_offset": f"0x{white + 4:X}",
         }
@@ -575,6 +590,49 @@ def search_grid_alternating_dispatch(image, rva, code, ranges, palette, color_of
                 "slot": "0x48",
                 "dispatch": f"0x{rva + match.end() - 3:X}",
             })
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def search_grid_color_copy(rva, code, ranges, imports, palette, color_offset):
+    if palette is None:
+        return None
+    receiver = re.escape(struct.pack("<I", int(palette["palette_receiver_offset"], 16)))
+    load_palette = rb"\x48\x8b\x80" + receiver
+    fallback_color = rb"\x48\x81\xc2" + re.escape(color_offset)
+    if palette["alternating_offset"] == "0x74":
+        pattern = (
+            rb"\x83\xf8\x02\x75(?P<branch>.)\x41\xc7\x86\x90\x00\x00\x00\x00\x00\x00\x00"
+            rb"\x49\x8b\x47\x08" + load_palette + rb"(?P<read>\x8b\x48\x74)"
+            rb"\x89\x4c\x24\x30\x48\x8b\x05(?P<import>.{4})"
+            rb".{20,64}?\x49\x8b\x57\x08(?P<fallback>" + fallback_color + rb")"
+        )
+        expected_import = "?kUUIDNull@core@@3U_GUID@@B"
+    else:
+        pattern = (
+            rb"\x83\xf8\x02\x75(?P<branch>.)\x49\x8b\x46\x08" + load_palette
+            + rb"(?P<read>\x8b\x90\x80\x00\x00\x00)\x48\x8d\x4d\xa0\xff\x15(?P<import>.{4})"
+            rb"\x4c\x8d\x45\xa0\x33\xd2\x48\x8d\x4c\x24\x78\xff\x15.{4}"
+            rb"\xc7\x45\x94\x32\x00\x00\x00\xeb.\x49\x8b\x56\x08(?P<fallback>" + fallback_color + rb")"
+        )
+        expected_import = "??0CompositeID@core@@QEAA@J@Z"
+
+    starts = sorted(ranges)
+    candidates = []
+    for match in re.finditer(pattern, code, re.S):
+        target = rva + match.end("import") + struct.unpack("<i", match["import"])[0]
+        if imports.get(target) != expected_import:
+            continue
+        branch_target = match.end("branch") + struct.unpack("<b", match["branch"])[0]
+        if branch_target != match.start("fallback") - 4:
+            continue
+        index = bisect_right(starts, rva + match.start()) - 1
+        if index < 0 or rva + match.end() > ranges[starts[index]]:
+            continue
+        candidates.append({
+            "method": f"0x{starts[index]:X}",
+            "palette_read": f"0x{rva + match.start('read'):X}",
+            "fallback_field_address": f"0x{rva + match.start('fallback'):X}",
+        })
     return candidates[0] if len(candidates) == 1 else None
 
 
@@ -647,6 +705,8 @@ def search_grid_candidates(image, rva, code):
                             "alternating_palette": palette,
                             "alternating_dispatch": search_grid_alternating_dispatch(
                                 image, rva, code, ranges, palette, assignment[2]),
+                            "alternating_color_copy": search_grid_color_copy(
+                                rva, code, ranges, imports, palette, assignment[2]),
                         }
 
 

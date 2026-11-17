@@ -25,6 +25,11 @@ if /i "%~2"=="tooltip-trace" (
     set "THEME_DLL_FLAGS=/DTHEME_TOOLTIP_TRACE"
     set "THEME_LAUNCHER_FLAGS=/DTHEME_TOOLTIP_TRACE"
 )
+if /i "%~2"=="form-line-trace" (
+    set "THEME_SOURCE=cairo_experiment.cpp"
+    set "THEME_DLL_FLAGS=/DTHEME_FORM_LINE_TRACE"
+    set "THEME_LAUNCHER_FLAGS=/DTHEME_FORM_LINE_TRACE"
+)
 if /i "%~2"=="int3" set "THEME_LAUNCHER_FLAGS=/DTHEME_BENCHMARK"
 if /i "%~2"=="int3-bg" (
     set "THEME_DLL_FLAGS=/DTHEME_BACKGROUND_ONLY"

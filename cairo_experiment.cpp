@@ -1,6 +1,9 @@
 #include "platform.hpp"
 #ifdef THEME_TOOLTIP_TRACE
 #include "tooltip_trace.hpp"
+#elif defined(THEME_FORM_LINE_TRACE)
+#include "form_line_trace.hpp"
+#include <cstring>
 #endif
 
 #include <intrin.h>
@@ -32,12 +35,17 @@ ImportHook hooks[] = {
     {sourceRgbSlot, "cairo_set_source_rgb", reinterpret_cast<PVOID>(&setSourceRgb)},
     {sourceRgbaSlot, "cairo_set_source_rgba", reinterpret_cast<PVOID>(&setSourceRgba)},
 };
-#ifdef THEME_TOOLTIP_TRACE
+#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE)
 constexpr size_t firstHook = 1;
 constexpr size_t hookCount = std::size(hooks);
 SRWLOCK traceLock = SRWLOCK_INIT;
+#ifdef THEME_TOOLTIP_TRACE
 TooltipTrace trace;
 const TooltipTracePlatform* tracePlatform;
+#else
+FormLineTrace trace;
+const FormLineTracePlatform* tracePlatform;
+#endif
 #else
 constexpr size_t firstHook = 0;
 #ifdef THEME_BACKGROUND_ONLY
@@ -79,6 +87,17 @@ bool isTreeFill(const ULONG_PTR* stack)
            isTreeReceiver(stack, 0x600);
 }
 
+#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE)
+bool packRgba(double red, double green, double blue, double alpha, DWORD& rgba)
+{
+    const auto isChannel = [](double value) { return value >= 0 && value <= 1; };
+    if (!isChannel(red) || !isChannel(green) || !isChannel(blue) || !isChannel(alpha)) return false;
+    const auto byte = [](double value) { return static_cast<DWORD>(value * 255.0 + 0.5); };
+    rgba = (byte(red) << 24) | (byte(green) << 16) | (byte(blue) << 8) | byte(alpha);
+    return true;
+}
+#endif
+
 #ifdef THEME_TOOLTIP_TRACE
 bool isExpandedTooltip(const ULONG_PTR* stack)
 {
@@ -98,16 +117,44 @@ bool isExpandedTooltip(const ULONG_PTR* stack)
 
 void countTooltipColor(double red, double green, double blue, double alpha)
 {
-    const auto isChannel = [](double value) { return value >= 0 && value <= 1; };
-    if (!isChannel(red) || !isChannel(green) || !isChannel(blue) || !isChannel(alpha)) return;
-    const auto byte = [](double value) { return static_cast<DWORD>(value * 255.0 + 0.5); };
-    const DWORD rgba = (byte(red) << 24) | (byte(green) << 16) | (byte(blue) << 8) | byte(alpha);
+    DWORD rgba{};
+    if (!packRgba(red, green, blue, alpha, rgba)) return;
     AcquireSRWLockExclusive(&traceLock);
     DWORD* count = &trace.otherCalls;
     for (auto& color : trace.colors) {
         if (color.calls && color.rgba != rgba) continue;
         color.rgba = rgba;
         count = &color.calls;
+        break;
+    }
+    if (*count != MAXDWORD) ++*count;
+    ReleaseSRWLockExclusive(&traceLock);
+}
+#elif defined(THEME_FORM_LINE_TRACE)
+void recordFormLine(const ULONG_PTR* stack, double red, double green, double blue, double alpha)
+{
+    const auto stackTop = reinterpret_cast<ULONG_PTR>(
+        reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
+    const auto address = reinterpret_cast<ULONG_PTR>(stack);
+    if (address > stackTop || stackTop - address < 0x138 ||
+        stack[0x40 / sizeof(*stack)] != graphicsBase + tracePlatform->penReturn ||
+        stack[0xE0 / sizeof(*stack)] != graphicsBase + tracePlatform->segmentReturn ||
+        stack[0x130 / sizeof(*stack)] != frameBase + tracePlatform->rendererReturn) return;
+
+    DWORD rgba{};
+    if (!packRgba(red, green, blue, alpha, rgba)) return;
+    // The +0xD0 wrapper keeps both logical points in its stack frame.
+    POINT first{}, second{};
+    std::memcpy(&first, stack + 0x120 / sizeof(*stack), sizeof(first));
+    std::memcpy(&second, stack + 0x118 / sizeof(*stack), sizeof(second));
+
+    AcquireSRWLockExclusive(&traceLock);
+    DWORD* count = &trace.otherCalls;
+    for (auto& line : trace.lines) {
+        if (line.calls && (line.rgba != rgba || line.x1 != first.x || line.y1 != first.y ||
+                           line.x2 != second.x || line.y2 != second.y)) continue;
+        if (!line.calls) line = {rgba, first.x, first.y, second.x, second.y, 0};
+        count = &line.calls;
         break;
     }
     if (*count != MAXDWORD) ++*count;
@@ -133,6 +180,8 @@ void setSourceRgba(void* context, double red, double green, double blue, double 
 {
 #ifdef THEME_TOOLTIP_TRACE
     const auto expectedReturn = tracePlatform->graphics.rgbaReturn;
+#elif defined(THEME_FORM_LINE_TRACE)
+    const auto expectedReturn = tracePlatform->rgbaReturn;
 #else
     // grphcs+0x22D0 calls Cairo with the original ARGB split into four channels.
     constexpr auto expectedReturn = 0x2336;
@@ -142,6 +191,8 @@ void setSourceRgba(void* context, double red, double green, double blue, double 
         const auto* stack = static_cast<const ULONG_PTR*>(_AddressOfReturnAddress());
 #ifdef THEME_TOOLTIP_TRACE
         if (isExpandedTooltip(stack)) countTooltipColor(red, green, blue, alpha);
+#elif defined(THEME_FORM_LINE_TRACE)
+        recordFormLine(stack, red, green, blue, alpha);
 #else
         const auto stackTop = reinterpret_cast<ULONG_PTR>(
             reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
@@ -168,7 +219,11 @@ void setSourceRgba(void* context, double red, double green, double blue, double 
 
 DWORD resolveHooks()
 {
+#ifdef THEME_FORM_LINE_TRACE
+    const auto frame = GetModuleHandleW(L"frmcore.dll");
+#else
     const auto frame = GetModuleHandleW(L"frame.dll");
+#endif
     const auto graphics = GetModuleHandleW(L"grphcs.dll");
     const auto cairo = GetModuleHandleW(L"cairo.dll");
     if (!frame || !graphics || !cairo) return ERROR_MOD_NOT_FOUND;
@@ -179,6 +234,13 @@ DWORD resolveHooks()
         !matchesSha256(modulePath(graphics), platform->graphicsHash)) return ERROR_REVISION_MISMATCH;
     tracePlatform = platform;
     hooks[firstHook].offset = platform->graphics.rgbaSlot;
+#elif defined(THEME_FORM_LINE_TRACE)
+    if (IsDebuggerPresent()) return ERROR_REVISION_MISMATCH;
+    const auto* platform = findFormLineTracePlatform(modulePath(nullptr));
+    if (!platform || !matchesSha256(modulePath(frame), platform->rendererHash) ||
+        !matchesSha256(modulePath(graphics), platform->graphicsHash)) return ERROR_REVISION_MISMATCH;
+    tracePlatform = platform;
+    hooks[firstHook].offset = platform->rgbaSlot;
 #else
     if (IsDebuggerPresent() || !matchesSha256(modulePath(nullptr), exeHash) ||
         !matchesSha256(modulePath(frame), frameHash) ||
@@ -238,10 +300,14 @@ DWORD setHook(bool on)
 
 #ifdef THEME_TOOLTIP_TRACE
 extern "C" __declspec(dllexport) DWORD WINAPI ReadTooltipTrace(LPVOID output)
+#elif defined(THEME_FORM_LINE_TRACE)
+extern "C" __declspec(dllexport) DWORD WINAPI ReadFormLineTrace(LPVOID output)
+#endif
+#if defined(THEME_TOOLTIP_TRACE) || defined(THEME_FORM_LINE_TRACE)
 {
     if (!output) return ERROR_INVALID_PARAMETER;
     AcquireSRWLockExclusive(&traceLock);
-    *static_cast<TooltipTrace*>(output) = trace;
+    *static_cast<decltype(trace)*>(output) = trace;
     trace = {};
     ReleaseSRWLockExclusive(&traceLock);
     return ERROR_SUCCESS;

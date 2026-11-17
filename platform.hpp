@@ -7,6 +7,7 @@
 #include <array>
 #include <limits>
 #include <string>
+#include <string_view>
 
 inline constexpr ULONG_PTR enableTreeOnly = 1;
 inline constexpr ULONG_PTR enableTreeAndCaption = 2;
@@ -74,7 +75,9 @@ inline std::wstring modulePath(HMODULE module)
     return path;
 }
 
-inline bool matchesSha256(const std::wstring& path, const wchar_t* expected)
+using Sha256Hex = std::array<wchar_t, 65>;
+
+inline bool readSha256(const std::wstring& path, Sha256Hex& hash)
 {
     const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -98,8 +101,15 @@ inline bool matchesSha256(const std::wstring& path, const wchar_t* expected)
     if (!hashed) return false;
     constexpr wchar_t hex[] = L"0123456789ABCDEF";
     for (size_t i = 0; i < digest.size(); ++i) {
-        if (expected[2*i] != hex[digest[i] >> 4] ||
-            expected[2*i+1] != hex[digest[i] & 15]) return false;
+        hash[2 * i] = hex[digest[i] >> 4];
+        hash[2 * i + 1] = hex[digest[i] & 15];
     }
+    hash.back() = L'\0';
     return true;
+}
+
+inline bool matchesSha256(const std::wstring& path, const wchar_t* expected)
+{
+    Sha256Hex hash{};
+    return readSha256(path, hash) && std::wstring_view(hash.data()) == expected;
 }

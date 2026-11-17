@@ -71,7 +71,8 @@ bool validTrace(const PropertyPaintProbeTrace& trace)
 {
     using namespace propertyDescription;
     if (trace.size != sizeof(trace) || trace.version != propertyPaintProbeVersion ||
-        trace.sampleCount > propertyPaintProbeCapacity) return false;
+        trace.sampleCount > propertyPaintProbeCapacity ||
+        trace.siteSampleCount > propertyPaintProbeCapacity) return false;
     auto totals = trace.counts;
     if (totals.mismatches > MAXULONGLONG - totals.readFailures) return false;
     auto rejected = totals.mismatches + totals.readFailures;
@@ -80,6 +81,21 @@ bool validTrace(const PropertyPaintProbeTrace& trace)
         rejected -= count;
     }
     if (rejected) return false;
+    if (totals.siteMismatches > totals.mismatches ||
+        totals.siteMismatches > totals.rejectedStages[static_cast<size_t>(Stage::Site)] ||
+        totals.siteReadFailures > totals.readFailures ||
+        totals.rejectedStages[static_cast<size_t>(Stage::Site)] - totals.siteMismatches != totals.siteReadFailures ||
+        totals.siteCapacityDrops > totals.siteMismatches) return false;
+    auto siteRemaining = totals.siteMismatches - totals.siteCapacityDrops;
+    for (DWORD i = 0; i < trace.siteSampleCount; ++i) {
+        const auto& sample = trace.siteSamples[i];
+        const auto& id = sample.identity;
+        if (!sample.calls || sample.calls > siteRemaining || id.imageFlags > 3 || id.linked18 > 1 ||
+            (!(id.imageFlags & 1) && id.siteTableRva) ||
+            (!(id.imageFlags & 2) && id.idTableRva)) return false;
+        siteRemaining -= sample.calls;
+    }
+    if (siteRemaining) return false;
     for (DWORD i = 0; i < trace.sampleCount; ++i) {
         const auto& sample = trace.samples[i];
         const auto& id = sample.identity;
@@ -267,7 +283,7 @@ int propertyPaintProbeToDesigner(DWORD pid, ULONGLONG creation)
         return attachResult(AttachStatus::Ambiguous, ERROR_INVALID_STATE, result);
     if (const auto error = propertyPaintProbeReplyError(trace, call, beforeProtection)) return error;
     const auto& counts = trace.counts;
-    std::printf("{\"status\":\"%s\",\"cleanupVerified\":true,\"payloadReleased\":true,\"pid\":%lu,"
+    std::printf("{\"version\":2,\"status\":\"%s\",\"cleanupVerified\":true,\"payloadReleased\":true,\"pid\":%lu,"
                 "\"creation\":\"%llu\",\"elapsedMs\":%lu,\"siteRva\":%lu,"
                 "\"originalProtection\":%lu,\"finalProtection\":%lu,"
                 "\"description\":%llu,\"list\":%llu,\"foreignId10\":%llu,\"mismatches\":%llu,"
@@ -294,6 +310,20 @@ int propertyPaintProbeToDesigner(DWORD pid, ULONGLONG creation)
     for (size_t i = 0; i < counts.rejectedStages.size(); ++i) {
         if (i) std::putchar(',');
         std::printf("%llu", counts.rejectedStages[i]);
+    }
+    std::printf("],\"siteMismatches\":%llu,\"siteReadFailures\":%llu,\"siteCapacityDrops\":%llu,\"rejectedSites\":[",
+                counts.siteMismatches, counts.siteReadFailures, counts.siteCapacityDrops);
+    for (DWORD i = 0; i < trace.siteSampleCount; ++i) {
+        const auto& sample = trace.siteSamples[i];
+        const auto& id = sample.identity;
+        if (i) std::putchar(',');
+        std::printf("{\"siteTableRva\":");
+        if (id.imageFlags & 1) std::printf("%lu", id.siteTableRva);
+        else std::printf("null");
+        std::printf(",\"idTableRva\":");
+        if (id.imageFlags & 2) std::printf("%lu", id.idTableRva);
+        else std::printf("null");
+        std::printf(",\"linked18\":%s,\"calls\":%llu}", id.linked18 ? "true" : "false", sample.calls);
     }
     std::puts("]}");
     return 0;

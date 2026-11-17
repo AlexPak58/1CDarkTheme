@@ -21,8 +21,10 @@ std::atomic<ULONGLONG> deadline{}, busyDrops{};
 std::atomic<DWORD> activeCollectors{};
 bool attempted{};
 DWORD sampleCount{};
+DWORD siteSampleCount{};
 PropertyPaintProbeCounts counts{};
 std::array<PropertyPaintSample, propertyPaintProbeCapacity> samples{};
+std::array<PropertyPaintSiteSample, propertyPaintProbeCapacity> siteSamples{};
 
 static_assert(std::atomic<ULONG_PTR>::is_always_lock_free);
 static_assert(std::atomic<ULONGLONG>::is_always_lock_free);
@@ -49,7 +51,8 @@ struct StackRange {
 
 template <typename Reader = GuardedReader>
 Outcome captureIdentity(const CONTEXT& ctx, ULONG_PTR frame, Identity& identity,
-                        PropertyPaintArguments& arguments, const Reader& read = {}, Stage* stage = nullptr)
+                        PropertyPaintArguments& arguments, const Reader& read = {}, Stage* stage = nullptr,
+                        propertyPaint::SiteObservation* rejectedSite = nullptr)
 {
     setStage(stage, Stage::Input);
     if (!frame || !ctx.Rdi) return Outcome::ReadFailure;
@@ -69,7 +72,7 @@ Outcome captureIdentity(const CONTEXT& ctx, ULONG_PTR frame, Identity& identity,
     arguments.skipFill = skipFill;
     bool brushPresent{};
     const auto outcome = propertyPaint::inspectPaint(frame, ctx.Rdi, currentBrushSource,
-        identity, brushPresent, read, stage);
+        identity, brushPresent, read, stage, rejectedSite);
     arguments.brushPresent = brushPresent ? 1 : 0;
     return outcome;
 }
@@ -92,6 +95,19 @@ void recordSample(const Identity& identity, const PropertyPaintArguments& argume
     }
 }
 
+void recordSite(const propertyPaint::SiteObservation& identity)
+{
+    ++counts.siteMismatches;
+    size_t index{};
+    while (index < siteSampleCount && !(siteSamples[index].identity == identity)) ++index;
+    if (index == siteSampleCount && siteSampleCount == siteSamples.size()) {
+        ++counts.siteCapacityDrops;
+        return;
+    }
+    if (index == siteSampleCount) siteSamples[siteSampleCount++] = {identity, 1};
+    else ++siteSamples[index].calls;
+}
+
 void recordCall(const CONTEXT& context, ULONG_PTR frame)
 {
     if (!TryAcquireSRWLockExclusive(&sampleLock)) {
@@ -100,12 +116,17 @@ void recordCall(const CONTEXT& context, ULONG_PTR frame)
     }
     Identity identity{};
     PropertyPaintArguments arguments{};
+    propertyPaint::SiteObservation rejectedSite{};
     Stage stage{};
-    switch (captureIdentity(context, frame, identity, arguments, GuardedReader{}, &stage)) {
+    switch (captureIdentity(context, frame, identity, arguments, GuardedReader{}, &stage, &rejectedSite)) {
     case Outcome::ReadFailure:
-        ++counts.readFailures; ++counts.rejectedStages[static_cast<size_t>(stage)]; break;
+        ++counts.readFailures; ++counts.rejectedStages[static_cast<size_t>(stage)];
+        if (stage == Stage::Site) ++counts.siteReadFailures;
+        break;
     case Outcome::Mismatch:
-        ++counts.mismatches; ++counts.rejectedStages[static_cast<size_t>(stage)]; break;
+        ++counts.mismatches; ++counts.rejectedStages[static_cast<size_t>(stage)];
+        if (stage == Stage::Site) recordSite(rejectedSite);
+        break;
     case Outcome::Accepted: recordSample(identity, arguments); break;
     }
     ReleaseSRWLockExclusive(&sampleLock);
@@ -287,7 +308,9 @@ DWORD copySamples(PropertyPaintProbeTrace& trace)
         Sleep(1);
     }
     trace.sampleCount = sampleCount;
+    trace.siteSampleCount = siteSampleCount;
     trace.samples = samples;
+    trace.siteSamples = siteSamples;
     trace.counts = counts;
     trace.counts.busyDrops = busyDrops.load(std::memory_order_relaxed);
     ReleaseSRWLockExclusive(&sampleLock);
@@ -353,12 +376,12 @@ DWORD publish(void* output, const PropertyPaintProbeTrace& trace, DWORD result)
 
 } // namespace
 
-extern "C" __declspec(dllexport) DWORD WINAPI PropertyPaintProbeAbiV1(void*)
+extern "C" __declspec(dllexport) DWORD WINAPI PropertyPaintProbeAbiV2(void*)
 {
     return propertyPaintProbeVersion;
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI RunPropertyPaintProbeV1(void* output)
+extern "C" __declspec(dllexport) DWORD WINAPI RunPropertyPaintProbeV2(void* output)
 {
     if (!validInput(output)) return ERROR_INVALID_PARAMETER;
     PropertyPaintProbeTrace trace;

@@ -240,6 +240,52 @@ void testCountsAndContext()
     require(!copySamples(trace) && trace.sampleCount == propertyPaintProbeCapacity &&
         trace.counts.description == propertyPaintProbeCapacity + 1 && trace.counts.capacityDrops == 1 &&
         trace.counts.busyDrops == 1 && trace.samples[0].calls == 2, "aggregate within the fixed capacity");
+
+    for (DWORD index = 0; index < propertyPaintProbeCapacity; ++index)
+        recordSite({0xB00000 + index * 8, idTypeRva, 3, 1});
+    recordSite({0xB00000, idTypeRva, 3, 1});
+    recordSite({0xB10000, idTypeRva, 3, 1});
+    require(!copySamples(trace) && trace.siteSampleCount == propertyPaintProbeCapacity &&
+        trace.counts.siteMismatches == propertyPaintProbeCapacity + 2 &&
+        trace.counts.siteCapacityDrops == 1 && trace.siteSamples[0].calls == 2,
+        "bounded rejected-site aggregation and explicit overflow count");
+}
+
+void testSiteDiagnostics()
+{
+    Objects objects;
+    Identity id{};
+    bool brush{};
+    Stage stage{};
+    propertyPaint::SiteObservation observed{};
+    const auto inspect = [&] {
+        return propertyPaint::inspectPaint(fakeFrame, address(objects.window), address(objects.owner, 0x5C8),
+            id, brush, ImageFixtureReader{}, &stage, &observed);
+    };
+    put(objects.site, 0, fakeFrame + siteTypeRva + 8);
+    require(inspect() == Outcome::Mismatch && stage == Stage::Site && observed.imageFlags == 3 &&
+        observed.linked18 == 1 && observed.siteTableRva == siteTypeRva + 8 && observed.idTableRva == idTypeRva,
+        "site table mismatch stays rejected and publishes verified RVAs");
+    put(objects.site, 0, fakeFrame + siteTypeRva);
+    put(objects.site, 0x18, fakeFrame + idTypeRva + 8);
+    require(inspect() == Outcome::Mismatch && observed.imageFlags == 3 && observed.idTableRva == idTypeRva + 8,
+        "ID table mismatch remains rejected");
+    put(objects.site, 0x18, fakeFrame + idTypeRva);
+    put(objects.site, 0x20, fakeFrame + idTypeRva);
+    put(objects.owner, 0x528, address(objects.site, 0x20));
+    require(inspect() == Outcome::Mismatch && observed.linked18 == 0 && observed.imageFlags == 3,
+        "interface relation mismatch is distinct from table mismatch");
+    put(objects.owner, 0x528, address(objects.site, 0x18));
+    put(objects.site, 0, address(objects.site));
+    require(inspect() == Outcome::Mismatch && observed.imageFlags == 2 && !observed.siteTableRva &&
+        observed.idTableRva == idTypeRva, "non-image site pointer is not published as an RVA");
+    put(objects.site, 0, fakeFrame + siteTypeRva);
+    put(objects.site, 0x18, ULONG_PTR{});
+    require(inspect() == Outcome::Mismatch && observed.imageFlags == 1 && !observed.idTableRva,
+        "null ID table has independent absent provenance");
+    put(objects.site, 0x18, fakeFrame + idTypeRva);
+    require(inspect() == Outcome::Accepted && observed == propertyPaint::SiteObservation{},
+        "accepted identity does not carry a previous rejection observation");
 }
 
 void testPatch()
@@ -334,19 +380,20 @@ void testPatch()
 int main()
 {
     PropertyPaintProbeTrace trace;
-    require(PropertyPaintProbeAbiV1(nullptr) == propertyPaintProbeVersion, "diagnostic ABI");
+    require(PropertyPaintProbeAbiV2(nullptr) == propertyPaintProbeVersion, "diagnostic ABI");
     trace.version = 0;
-    require(RunPropertyPaintProbeV1(&trace) == ERROR_INVALID_PARAMETER && !attempted,
+    require(RunPropertyPaintProbeV2(&trace) == ERROR_INVALID_PARAMETER && !attempted,
         "wrong ABI rejected before one-shot");
     trace.version = propertyPaintProbeVersion;
     trace.size = sizeof(DWORD) * 2;
-    require(RunPropertyPaintProbeV1(&trace) == ERROR_INVALID_PARAMETER && !attempted,
+    require(RunPropertyPaintProbeV2(&trace) == ERROR_INVALID_PARAMETER && !attempted,
         "short payload rejected before one-shot");
     trace.size = sizeof(trace);
     attempted = true;
-    require(RunPropertyPaintProbeV1(&trace) == ERROR_ALREADY_EXISTS, "reject rearming");
+    require(RunPropertyPaintProbeV2(&trace) == ERROR_ALREADY_EXISTS, "reject rearming");
     testCapture();
     testCountsAndContext();
+    testSiteDiagnostics();
     testPatch();
     std::puts("PASS: upper property identity, numeric arguments, exact LEA replay and rollback");
 }

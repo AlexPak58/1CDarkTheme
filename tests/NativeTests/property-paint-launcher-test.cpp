@@ -65,6 +65,40 @@ DWORD WINAPI fixtureWorker(LPVOID payload)
 int wmain(int argc, wchar_t** argv)
 {
     require(argc == 4, "expected upper, lower and production DLL paths");
+    {
+        using namespace propertyDescription;
+        PropertyPaintProbeTrace siteTrace;
+        siteTrace.counts.mismatches = 4;
+        siteTrace.counts.readFailures = 1;
+        siteTrace.counts.rejectedStages[static_cast<size_t>(Stage::Site)] = 5;
+        siteTrace.counts.siteMismatches = 4;
+        siteTrace.counts.siteReadFailures = 1;
+        siteTrace.counts.siteCapacityDrops = 1;
+        siteTrace.siteSampleCount = 2;
+        siteTrace.siteSamples[0] = {{siteTypeRva + 8, idTypeRva, 3, 1}, 2};
+        siteTrace.siteSamples[1] = {{0, idTypeRva, 2, 0}, 1};
+        require(validTrace(siteTrace), "site mismatch sums exclude read failures and include capacity drops");
+        siteTrace.counts.siteReadFailures = 0;
+        require(!validTrace(siteTrace), "site rejection cannot disappear from both outcome counters");
+        siteTrace.counts.siteReadFailures = 1;
+        siteTrace.siteSamples[1].identity.siteTableRva = 123;
+        require(!validTrace(siteTrace), "unverified pointer cannot be published as an RVA");
+        siteTrace.siteSamples[1].identity.siteTableRva = 0;
+        siteTrace.siteSamples[1].identity.imageFlags = 4;
+        require(!validTrace(siteTrace), "reject unknown provenance bits");
+        siteTrace.siteSamples[1].identity.imageFlags = 2;
+        siteTrace.siteSamples[1].identity.linked18 = 2;
+        require(!validTrace(siteTrace), "reject non-boolean relation");
+        siteTrace.siteSamples[1].identity.linked18 = 0;
+        siteTrace.siteSamples[1].calls = MAXULONGLONG;
+        require(!validTrace(siteTrace), "reject overflowing site call sums");
+        siteTrace.siteSamples[1].calls = 1;
+        siteTrace.counts.siteCapacityDrops = 0;
+        require(!validTrace(siteTrace), "missing site count cannot disappear");
+        siteTrace.counts.siteCapacityDrops = 1;
+        siteTrace.version = 1;
+        require(!validTrace(siteTrace), "reject previous upper probe ABI");
+    }
     wchar_t executable[] = L"property-paint-probe-run.exe";
     wchar_t command[] = L"--property-paint-probe";
     wchar_t otherCommand[] = L"--attach";

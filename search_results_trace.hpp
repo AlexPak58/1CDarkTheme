@@ -19,6 +19,7 @@ struct SearchResultsTrace {
     DWORD otherCreations;
     DWORD resultsBackgrounds;
     DWORD otherBackgrounds;
+    DWORD replacedCairoFills;
 };
 
-static_assert(sizeof(SearchResultsTrace) == (11 + searchGridWhiteWriteRvas.size()) * sizeof(DWORD));
+static_assert(sizeof(SearchResultsTrace) == (12 + searchGridWhiteWriteRvas.size()) * sizeof(DWORD));

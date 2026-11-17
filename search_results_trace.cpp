@@ -57,6 +57,7 @@ std::atomic<DWORD> resultsAggregatedCreations{};
 std::atomic<DWORD> otherCreations{};
 std::atomic<DWORD> resultsBackgrounds{};
 std::atomic<DWORD> otherBackgrounds{};
+std::atomic<DWORD> replacedCairoFills{};
 
 struct GridCandidate {
     ULONG_PTR address;
@@ -65,6 +66,75 @@ struct GridCandidate {
 };
 
 thread_local GridCandidate lastCandidate{};
+
+bool matchesCandidate(ULONG_PTR control)
+{
+    return control && control == lastCandidate.address &&
+        lastCandidate.generation == traceGeneration.load(std::memory_order_relaxed) &&
+        *reinterpret_cast<const ULONG_PTR*>(control) == lastCandidate.vtable;
+}
+
+#ifdef THEME_SEARCH_RESULTS_COLOR_TEST
+using SetSourceRgb = void (*)(void*, double, double, double);
+PVOID* cairoRgbSlot{};
+PVOID originalCairoRgb{};
+ULONG_PTR paintFrameBase{};
+ULONG_PTR graphicsBase{};
+DWORD cairoSlotProtection{};
+bool cairoPatched{};
+
+bool isSearchBackground(const ULONG_PTR* stack)
+{
+    const auto top = reinterpret_cast<ULONG_PTR>(
+        reinterpret_cast<const NT_TIB*>(NtCurrentTeb())->StackBase);
+    const auto address = reinterpret_cast<ULONG_PTR>(stack);
+    // A45D0 saves the renderer's RDI directly below its return address.
+    return address <= top && top - address >= 0x1A8 &&
+        stack[0xA0 / 8] == graphicsBase + 0xAC6DC &&
+        stack[0x150 / 8] == paintFrameBase + 0xA4638 &&
+        stack[0x1A0 / 8] == paintFrameBase + 0x811A08 &&
+        matchesCandidate(stack[0x198 / 8]);
+}
+
+void setSearchSourceRgb(void* context, double red, double green, double blue)
+{
+    if (reinterpret_cast<ULONG_PTR>(_ReturnAddress()) == graphicsBase + 0xAEE56 &&
+        red == 1.0 && green == 1.0 && blue == 1.0 &&
+        collecting.load(std::memory_order_acquire) &&
+        isSearchBackground(static_cast<const ULONG_PTR*>(_AddressOfReturnAddress()))) {
+        red = 0xBD / 255.0;
+        green = 0xD5 / 255.0;
+        blue = 0xEA / 255.0;
+        replacedCairoFills.fetch_add(1, std::memory_order_relaxed);
+    }
+    reinterpret_cast<SetSourceRgb>(originalCairoRgb)(context, red, green, blue);
+}
+
+DWORD patchCairo(bool enable)
+{
+    DWORD error{};
+    if (cairoPatched != enable) {
+        if (!cairoSlotProtection &&
+            !VirtualProtect(cairoRgbSlot, sizeof(PVOID), PAGE_READWRITE, &cairoSlotProtection))
+            return GetLastError();
+        const auto hook = reinterpret_cast<PVOID>(&setSearchSourceRgb);
+        const auto from = enable ? originalCairoRgb : hook;
+        const auto to = enable ? hook : originalCairoRgb;
+        if (InterlockedCompareExchangePointer(cairoRgbSlot, to, from) == from)
+            cairoPatched = enable;
+        else
+            error = ERROR_INVALID_DATA;
+    }
+    if (cairoSlotProtection) {
+        DWORD ignored{};
+        if (VirtualProtect(cairoRgbSlot, sizeof(PVOID), cairoSlotProtection, &ignored))
+            cairoSlotProtection = 0;
+        else if (!error)
+            error = GetLastError();
+    }
+    return error;
+}
+#endif
 
 bool hasResultsLoader(const CONTEXT& fault)
 {
@@ -141,9 +211,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     }
     if (address == background.address) {
         if (count) {
-            const bool match = context.Rdi == lastCandidate.address &&
-                lastCandidate.generation == traceGeneration.load(std::memory_order_relaxed) &&
-                *reinterpret_cast<const ULONG_PTR*>(context.Rdi) == lastCandidate.vtable;
+            const bool match = matchesCandidate(context.Rdi);
             auto& counter = match ? resultsBackgrounds : otherBackgrounds;
             counter.fetch_add(1, std::memory_order_relaxed);
         }
@@ -196,6 +264,20 @@ DWORD prepare()
 
     HMODULE pinned{};
     constexpr auto pin = GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
+#ifdef THEME_SEARCH_RESULTS_COLOR_TEST
+    const auto graphics = GetModuleHandleW(L"grphcs.dll");
+    const auto cairo = GetModuleHandleW(L"cairo.dll");
+    if (!graphics || !cairo) return ERROR_MOD_NOT_FOUND;
+    if (!matchesSha256(modulePath(graphics), graphicsHash)) return ERROR_REVISION_MISMATCH;
+    originalCairoRgb = reinterpret_cast<PVOID>(GetProcAddress(cairo, "cairo_set_source_rgb"));
+    if (!originalCairoRgb) return ERROR_PROC_NOT_FOUND;
+    if (!GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(graphics), &pinned) ||
+        !GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(cairo), &pinned))
+        return GetLastError();
+    paintFrameBase = frameBase;
+    graphicsBase = reinterpret_cast<ULONG_PTR>(graphics);
+    cairoRgbSlot = reinterpret_cast<PVOID*>(graphicsBase + 0xC7B60);
+#endif
     if (!GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(frame), &pinned) ||
         !GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(frontend), &pinned) ||
         !GetModuleHandleExW(pin, reinterpret_cast<LPCWSTR>(&onBreakpoint), &pinned))
@@ -247,6 +329,9 @@ DWORD disable()
 {
     collecting.store(false, std::memory_order_relaxed);
     DWORD firstError{};
+#ifdef THEME_SEARCH_RESULTS_COLOR_TEST
+    firstError = patchCairo(false);
+#endif
     for (auto it = sites.rbegin(); it != sites.rend(); ++it) {
         const DWORD error = patch(**it, false);
         if (!firstError) firstError = error;
@@ -275,6 +360,12 @@ DWORD setEnabled(bool enable)
             return rollbackError ? rollbackError : error;
         }
     }
+#ifdef THEME_SEARCH_RESULTS_COLOR_TEST
+    if (const DWORD error = patchCairo(true)) {
+        const DWORD rollbackError = disable();
+        return rollbackError ? rollbackError : error;
+    }
+#endif
     traceGeneration.fetch_add(1, std::memory_order_relaxed);
     collecting.store(true, std::memory_order_release);
     return ERROR_SUCCESS;
@@ -292,7 +383,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(void* setting)
     return error;
 }
 
-extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV3(void* output)
+extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV4(void* output)
 {
     if (!output) return ERROR_INVALID_PARAMETER;
     SearchResultsTrace trace{
@@ -308,6 +399,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI ReadSearchResultsTraceV3(void* out
         otherCreations.exchange(0, std::memory_order_relaxed),
         resultsBackgrounds.exchange(0, std::memory_order_relaxed),
         otherBackgrounds.exchange(0, std::memory_order_relaxed),
+        replacedCairoFills.exchange(0, std::memory_order_relaxed),
     };
     for (size_t i = 0; i < whiteWrites.size(); ++i)
         trace.whiteWrites[i] = whiteWrites[i].exchange(0, std::memory_order_relaxed);

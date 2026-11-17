@@ -159,15 +159,34 @@ ProbeCallResult callCounterProbe(HANDLE process, ULONG_PTR run, CounterProbeTrac
     // A timeout leaves the worker and its payload alive. No terminate/retry/unload.
     if (outcome.transportError == WAIT_TIMEOUT) return outcome;
     SIZE_T read{};
-    outcome.received = !outcome.transportError &&
-        ReadProcessMemory(process, payload, &trace, sizeof(trace), &read) && read == sizeof(trace);
+    const BOOL readOkay = !outcome.transportError &&
+        ReadProcessMemory(process, payload, &trace, sizeof(trace), &read);
+    outcome.received = readOkay && read == sizeof(trace);
     if (!outcome.received && !outcome.transportError) {
-        const auto error = GetLastError();
+        const auto error = readOkay ? ERROR_PARTIAL_COPY : GetLastError();
         outcome.transportError = error ? error : ERROR_PARTIAL_COPY;
     }
     outcome.payloadReleased = VirtualFreeEx(process, payload, 0, MEM_RELEASE) != FALSE;
     if (!outcome.payloadReleased && !outcome.transportError) outcome.transportError = GetLastError();
     return outcome;
+}
+
+int counterProbeReplyError(const CounterProbeTrace& trace, const ProbeCallResult& call,
+                           DWORD beforeProtection)
+{
+    if (!call.received) return attachResult(AttachStatus::Ambiguous, call.transportError, call.workerResult);
+    // An uncertain instruction-cache/patch cleanup takes priority over a payload leak.
+    if (trace.size != sizeof(trace) || trace.version != counterProbeVersion ||
+        trace.sampleCount > counterProbeCapacity || trace.cleanupError)
+        return attachResult(AttachStatus::Ambiguous, ERROR_INVALID_DATA, call.workerResult);
+    if (call.transportError || !call.payloadReleased)
+        return attachResult(AttachStatus::Error, call.transportError, call.workerResult);
+    if (call.workerResult || trace.patchError)
+        return attachResult(AttachStatus::Error, ERROR_SUCCESS,
+                            call.workerResult ? call.workerResult : trace.patchError);
+    if (trace.originalProtection != beforeProtection || trace.finalProtection != beforeProtection)
+        return attachResult(AttachStatus::Ambiguous, ERROR_INVALID_STATE);
+    return 0;
 }
 
 int counterProbeToDesigner(DWORD pid, ULONGLONG creation)
@@ -253,16 +272,7 @@ int counterProbeToDesigner(DWORD pid, ULONGLONG creation)
     if (checkProcessLifetime(process, creation) || !probeBytes(process, frontend, afterProtection) ||
         afterProtection != beforeProtection)
         return attachResult(AttachStatus::Ambiguous, ERROR_INVALID_STATE, result);
-    if (!call.received) return attachResult(AttachStatus::Ambiguous, call.transportError, result);
-    if (call.transportError || !call.payloadReleased)
-        return attachResult(AttachStatus::Error, call.transportError, result);
-    if (trace.size != sizeof(trace) || trace.version != counterProbeVersion ||
-        trace.sampleCount > counterProbeCapacity || trace.cleanupError)
-        return attachResult(AttachStatus::Ambiguous, ERROR_INVALID_DATA, result);
-    if (result || trace.patchError) return attachResult(AttachStatus::Error, ERROR_SUCCESS,
-                                                      result ? result : trace.patchError);
-    if (trace.originalProtection != beforeProtection || trace.finalProtection != beforeProtection)
-        return attachResult(AttachStatus::Ambiguous, ERROR_INVALID_STATE);
+    if (const auto error = counterProbeReplyError(trace, call, beforeProtection)) return error;
     std::vector<ProbeModule> afterModules;
     if (const auto error = probeModules(pid, afterModules))
         return attachResult(AttachStatus::Error, error);

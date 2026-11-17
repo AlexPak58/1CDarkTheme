@@ -73,6 +73,18 @@ int wmain(int argc, wchar_t** argv)
     call = callCounterProbe(GetCurrentProcess(), reinterpret_cast<ULONG_PTR>(&fixtureWorker), callTrace);
     require(call.received && call.payloadReleased && !call.transportError && !call.workerResult &&
             callTrace.elapsedMs == 456, "actual worker thread completes in this test process");
+    callTrace.originalProtection = callTrace.finalProtection = PAGE_EXECUTE_READ;
+    require(counterProbeReplyError(callTrace, call, PAGE_EXECUTE_READ) == 0, "clean reply accepted");
+    call.payloadReleased = false;
+    call.transportError = ERROR_ACCESS_DENIED;
+    require(counterProbeReplyError(callTrace, call, PAGE_EXECUTE_READ) == 1, "known buffer leak reports error");
+    callTrace.cleanupError = ERROR_WRITE_FAULT;
+    require(counterProbeReplyError(callTrace, call, PAGE_EXECUTE_READ) == 7,
+            "uncertain cache cleanup overrides simultaneous buffer release failure");
+    callTrace.cleanupError = 0;
+    callTrace.version = 0;
+    require(counterProbeReplyError(callTrace, call, PAGE_EXECUTE_READ) == 7,
+            "invalid reply overrides simultaneous buffer release failure");
 
     std::vector<ProbeModule> modules;
     require(probeModules(GetCurrentProcessId(), modules) == ERROR_SUCCESS, "own module inventory");

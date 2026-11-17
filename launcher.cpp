@@ -262,7 +262,9 @@ bool parseProfile(std::wstring_view input, ThemeProfile& profile)
     input.remove_prefix(separator + 1);
     if ((input.size() + 1) % 7 != 0) return false;
     const size_t colorCount = (input.size() + 1) / 7;
-    if (colorCount != paletteColorCount && colorCount != panelBorder &&
+    if (colorCount != paletteColorCount &&
+        !(colorCount == dockSplitterFill && zones < enableDockSplitter) &&
+        !(colorCount == panelBorder && zones < enableDockSplitter) &&
         !(colorCount == panelHeaderBackground && zones < enablePanelHeaders) &&
         !(colorCount == searchResultsBackground && zones < enableSearchResults) &&
         !(colorCount == toolbarBorder && zones < enableToolbarBorder) &&
@@ -795,8 +797,8 @@ int wmain(int argc, wchar_t** argv)
     const bool profileMode = argc == 5 && std::wstring_view(argv[3]) == L"--palette";
     ThemeProfile profile;
     if (profileMode && !parseProfile(argv[4], profile)) {
-        std::fputs("Invalid palette. Expected a zone mask and 36 six-digit RGB colors "
-                   "(25, 29, 30, 31, 33 or 35 for legacy palettes).\n", stderr);
+        std::fputs("Invalid palette. Expected a zone mask and 37 six-digit RGB colors "
+                   "(25, 29, 30, 31, 33, 35 or 36 for legacy palettes).\n", stderr);
         return 2;
     }
     ULONG_PTR selection{};

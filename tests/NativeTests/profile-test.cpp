@@ -73,10 +73,11 @@ int main(int argc, char** argv)
     check(argc == 2, "expected process mode");
     installationResult = ERROR_SUCCESS;  // Bypass production code patching in this standalone test.
     ThemeProfile profile;
-    check(profile.version == 7 && profile.size == 156 && profile.zones == 16127 &&
-          panelBorder == 35 && paletteColorCount == 36 &&
+    check(profile.version == 8 && profile.size == 160 && profile.zones == 32511 &&
+          panelBorder == 35 && dockSplitterFill == 36 && paletteColorCount == 37 &&
           profile.colors[panelHeaderBackground] == 0x1F2938 && profile.colors[panelHeaderText] == 0xE5EBF5 &&
-          profile.colors[panelBorder] == 0x3B4758, "native defaults include panel headers and border");
+          profile.colors[panelBorder] == 0x3B4758 && profile.colors[dockSplitterFill] == 0x3B4758,
+          "native defaults include panel headers, border and dock splitters");
     profile.zones = enableSearchResults;
     if (std::strcmp(argv[1], "DESIGNER") != 0) {
         check(SetThemeProfile(&profile) == ERROR_NOT_SUPPORTED, "DLL rejects Enterprise mode");
@@ -164,7 +165,7 @@ int main(int argc, char** argv)
     check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject incompatible profile version");
     profile.version = themeProfileVersion;
     profile.size -= static_cast<DWORD>(sizeof(DWORD));
-    check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject v7 profile with v6 size");
+    check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER, "reject v8 profile with v7 size");
     profile.size = static_cast<DWORD>(sizeof(profile));
     profile.colors[panelBorder] = 0x01000000;
     check(SetThemeProfile(&profile) == ERROR_INVALID_PARAMETER && activeProfile.load()->zones == 0,

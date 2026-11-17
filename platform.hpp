@@ -23,8 +23,9 @@ inline constexpr ULONG_PTR enableToolbarBand = 1024;
 inline constexpr ULONG_PTR enableToolbarBorder = 2048;
 inline constexpr ULONG_PTR enableSearchResults = 4096;
 inline constexpr ULONG_PTR enablePanelHeaders = 8192;
-inline constexpr DWORD themeZoneMask = 16383;
-inline constexpr DWORD themeProfileVersion = 7;
+inline constexpr ULONG_PTR enableDockSplitter = 16384;
+inline constexpr DWORD themeZoneMask = 32767;
+inline constexpr DWORD themeProfileVersion = 8;
 
 enum PaletteColor : size_t {
     treeBackground, treeText, captionBackground, captionText,
@@ -37,7 +38,7 @@ enum PaletteColor : size_t {
     popupMenuBackground, popupMenuGutter, popupMenuText, popupMenuShortcut,
     toolbarBandBackground, toolbarBorder,
     searchResultsBackground, searchResultsText,
-    panelHeaderBackground, panelHeaderText, panelBorder,
+    panelHeaderBackground, panelHeaderText, panelBorder, dockSplitterFill,
     paletteColorCount
 };
 
@@ -46,14 +47,14 @@ struct ThemeProfile {
     DWORD size{sizeof(ThemeProfile)};
     DWORD version{themeProfileVersion};
     DWORD zones{255 | enablePopupMenu | enableToolbarBand | enableToolbarBorder | enableSearchResults |
-                enablePanelHeaders};
+                enablePanelHeaders | enableDockSplitter};
     std::array<DWORD, paletteColorCount> colors{
         0x1F2938, 0x80F2C2, 0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5,
         0x1F2938, 0xE5EBF5, 0xA7B5C7, 0xB9D4FF, 0x305A8A, 0x1F2938,
         0x1F2938, 0xE5EBF5, 0xA7B5C7, 0x1F2938, 0xE5EBF5, 0x305A8A, 0x2A374A,
         0x1F2938, 0xE5EBF5, 0x305A8A, 0x2A374A, 0xFFFFFF, 0x000000,
         0x1F2938, 0x2A374A, 0xE5EBF5, 0x878B8F, 0x1F2938, 0x3B4A60,
-        0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5, 0x3B4758
+        0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5, 0x3B4758, 0x3B4758
     };
 };
 

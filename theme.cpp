@@ -3,6 +3,7 @@
 #include "list_identity.hpp"
 #include "devtool_binding.hpp"
 #include "panel_headers.hpp"
+#include "dock_splitters.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -370,6 +371,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     } else if (event.ExceptionAddress == sites[emptyFill].address) {
         // CMOVNE selects the low 32 bits and clears the high 32 bits.
         regs.Rdx = static_cast<DWORD>((regs.EFlags & 0x40) == 0 ? regs.Rax : regs.Rdx);
+        bool dockMatched = false;
         if (withLists && static_cast<DWORD>(regs.Rdx) == white &&
             callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
             callerAt(regs, 0x148) == frameBase + 0xA4638) {
@@ -378,6 +380,11 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
                 classifyListControl(callerAt(regs, 0x190), frameBase, frontendBase, devtoolBinding.base()) :
                 listKindAt(regs, 0x268);
             regs.Rdx = listColor(kind, white, theme, colors, false, true);
+        } else if ((theme & enableDockSplitter) != 0 && (regs.EFlags & 0x40) == 0 &&
+                   regs.Rdx == barBackgroundBgr &&
+                   dock_detail::matches(regs, frameBase, graphicsBase)) {
+            regs.Rdx = toBgr(colors.colors[dockSplitterFill]);
+            dockMatched = true;
         } else if ((theme & enableToolbarBand) != 0 && (regs.EFlags & 0x40) == 0 &&
                    regs.Rdx == barBackgroundBgr &&
                    callerAt(regs, 0x98) == graphicsBase + 0xAC6DC &&
@@ -418,7 +425,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         } else if (withProperties && (regs.EFlags & 0x40) == 0) {
             regs.Rdx = propertyFillColor(regs, static_cast<DWORD>(regs.Rdx), colors);
         }
-        if (withPopupMenu && (regs.EFlags & 0x40) == 0 &&
+        if (!dockMatched && withPopupMenu && (regs.EFlags & 0x40) == 0 &&
             (regs.Rdx == platformPopupMenuBackgroundBgr || regs.Rdx == platformPopupMenuGutterBgr))
             regs.Rdx = popupMenuFillColor(regs, static_cast<DWORD>(regs.Rdx), colors);
     } else if (event.ExceptionAddress == sites[labelColor].address) {
@@ -683,7 +690,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetTreeTheme(LPVOID setting)
 }
 
 #ifndef THEME_BACKGROUND_ONLY
-extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV7(LPVOID)
+extern "C" __declspec(dllexport) DWORD WINAPI ThemeProfileAttachV8(LPVOID)
 {
     return themeProfileVersion;
 }

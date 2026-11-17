@@ -17,6 +17,7 @@ REFERENCE_HASHES = {
 PROPERTY_PAINT_RETURN = 0x4F60ED
 SEARCH_LABEL_RENDER_RETURN = 0x5BD070
 SEARCH_LABEL_CLASS_ID = uuid.UUID("4f2defd2-5243-4166-b7f2-3e7ffc5f6394").bytes_le
+SEARCH_GRID_CLASS_ID = uuid.UUID("2dd8e24f-ea53-4aab-a45e-a973eb59375f").bytes_le
 SEARCH_LABEL_LAYOUTS = {
     (0xC20, 0xC38): (0x218, 0x110),
     (0xC68, 0xC80): (0x238, 0x120),
@@ -343,16 +344,13 @@ def dropdown_candidates(image, rva, code, descriptors):
                     }
 
 
-def search_label_factories(image, rva, code):
+def registered_factories(image, rva, code, class_id):
     data_rva, data_size, data_offset = image.sections.get(b".data", (0, 0, 0))
     ro_rva, ro_size, ro_offset = image.sections.get(b".rdata", (0, 0, 0))
     data = image.data[data_offset:data_offset + data_size]
     ro_data = image.data[ro_offset:ro_offset + ro_size]
     factory_prefix = b"\x48\x85\xc9\x0f\x84"
-    constructor_layouts = ((0x54, 0x73, b"\x48\x89\x03"), (0x67, 0x9D, b"\x48\x89\x43\x18"))
-    ranges = dict(image.function_ranges())
-    # This ID also appears in other modules. Validate both constructor branches.
-    for identifier in re.finditer(re.escape(SEARCH_LABEL_CLASS_ID), ro_data):
+    for identifier in re.finditer(re.escape(class_id), ro_data):
         address = image.image_base + ro_rva + identifier.start()
         for entry in re.finditer(re.escape(struct.pack("<Q", address)), data):
             record = data_rva + entry.start()
@@ -366,30 +364,104 @@ def search_label_factories(image, rva, code):
                 continue
             targets = [factory + end + struct.unpack_from("<i", code, begin + end - 4)[0]
                        for end in (9, 14)]
-            sizes, tables, initializers = [], [], []
-            for target, (size_offset, table_offset, store) in zip(targets, constructor_layouts):
-                allocation = target + size_offset - rva
-                load = target + table_offset - rva
-                store_end = load + 7 + len(store)
-                if not 0 <= allocation <= load - 10 or store_end > len(code):
-                    break
-                if ranges.get(target, 0) < rva + store_end:
-                    break
-                if (code[allocation] != 0xB9 or code[load - 5] != 0xE8
-                        or code[load:load + 3] != b"\x48\x8d\x05"
-                        or not code.startswith(store, load + 7)):
-                    break
-                table = rva + load + 7 + struct.unpack_from("<i", code, load + 3)[0]
-                if table % 8 or not ro_rva <= table <= ro_rva + ro_size - 8:
-                    break
-                first_method = struct.unpack_from("<Q", ro_data, table - ro_rva)[0] - image.image_base
-                if not rva <= first_method < rva + len(code):
-                    break
-                tables.append(table)
-                sizes.append(struct.unpack_from("<I", code, allocation + 1)[0])
-                initializers.append(rva + load + struct.unpack_from("<i", code, load - 4)[0])
-            if tuple(sizes) in SEARCH_LABEL_LAYOUTS and initializers[0] == initializers[1]:
-                yield factory, tables, tuple(sizes)
+            yield record, factory, targets
+
+
+def search_label_factories(image, rva, code):
+    ro_rva, ro_size, ro_offset = image.sections.get(b".rdata", (0, 0, 0))
+    ro_data = image.data[ro_offset:ro_offset + ro_size]
+    constructor_layouts = ((0x54, 0x73, b"\x48\x89\x03"), (0x67, 0x9D, b"\x48\x89\x43\x18"))
+    ranges = dict(image.function_ranges())
+    for _, factory, targets in registered_factories(image, rva, code, SEARCH_LABEL_CLASS_ID):
+        sizes, tables, initializers = [], [], []
+        for target, (size_offset, table_offset, store) in zip(targets, constructor_layouts):
+            allocation = target + size_offset - rva
+            load = target + table_offset - rva
+            store_end = load + 7 + len(store)
+            if not 0 <= allocation <= load - 10 or store_end > len(code):
+                break
+            if ranges.get(target, 0) < rva + store_end:
+                break
+            if (code[allocation] != 0xB9 or code[load - 5] != 0xE8
+                    or code[load:load + 3] != b"\x48\x8d\x05"
+                    or not code.startswith(store, load + 7)):
+                break
+            table = rva + load + 7 + struct.unpack_from("<i", code, load + 3)[0]
+            if table % 8 or not ro_rva <= table <= ro_rva + ro_size - 8:
+                break
+            first_method = struct.unpack_from("<Q", ro_data, table - ro_rva)[0] - image.image_base
+            if not rva <= first_method < rva + len(code):
+                break
+            tables.append(table)
+            sizes.append(struct.unpack_from("<I", code, allocation + 1)[0])
+            initializers.append(rva + load + struct.unpack_from("<i", code, load - 4)[0])
+        if tuple(sizes) in SEARCH_LABEL_LAYOUTS and initializers[0] == initializers[1]:
+            yield factory, tables, tuple(sizes)
+
+
+def search_grid_candidates(image, rva, code):
+    ranges = dict(image.function_ranges())
+    imports = {slot: symbol for _, symbol, slot in image.imports()}
+    ro_rva, ro_size, ro_offset = image.sections.get(b".rdata", (0, 0, 0))
+    # mov ecx, size; call [iat] ... lea rcx,[rbx+18h]; call ctor; set vtable
+    factory_pattern = re.compile(
+        rb"\xb9(.{4})\xff\x15(.{4}).{0,64}\x48\x8d\x4b\x18"
+        rb"\xe8(.{4})\x48\x8d\x05(.{4})\x48\x89\x43\x18", re.S)
+    # Call Color(CompositeID), then assign it to the constructor receiver's field.
+    assign_pattern = re.compile(
+        rb"\xff\x15(.{4})\x48\x8b\xd0\x48\x8d\x8e(.{4})\xff\x15(.{4})", re.S)
+    # Resolve the field through a virtual call, with kInvalidV8StyleEntryId in r9.
+    resolve_pattern = re.compile(
+        rb"\x48\x8b\x1d(.{4})\x48\x8b\xb8(.{4})\x49\x8b\x46\x60\xff\x50\x40"
+        rb"\x49\x8d\x96(.{4})\x4c\x8b\xcb\x4c\x8b\xc0"
+        rb"(?:\x49\x8b\xcc|\x49\x8b\xcf)\xff\xd7", re.S)
+    for record, factory, (_, target) in registered_factories(image, rva, code, SEARCH_GRID_CLASS_ID):
+        if not rva <= target < ranges.get(target, 0) <= rva + len(code):
+            continue
+        for setup in factory_pattern.finditer(code, target - rva, ranges[target] - rva):
+            allocator = rva + setup.end(2) + struct.unpack("<i", setup[2])[0]
+            if imports.get(allocator) != "?nuke_new_nothrow@@YAPEAX_K@Z":
+                continue
+            constructor = rva + setup.end(3) + struct.unpack("<i", setup[3])[0]
+            vtable = rva + setup.end(4) + struct.unpack("<i", setup[4])[0]
+            if not rva <= constructor < ranges.get(constructor, 0) <= rva + len(code):
+                continue
+            body = code[constructor - rva:ranges[constructor] - rva]
+            for assignment in assign_pattern.finditer(body):
+                color_import = constructor + assignment.end(1) + struct.unpack("<i", assignment[1])[0]
+                assign_import = constructor + assignment.end(3) + struct.unpack("<i", assignment[3])[0]
+                if (imports.get(color_import) != "??0Color@core@@QEAA@AEBVCompositeID@1@@Z"
+                        or imports.get(assign_import) != "??4Color@core@@QEAAAEAU01@AEBU01@@Z"):
+                    continue
+                setup_bytes = body[max(0, assignment.start() - 40):assignment.start()]
+                if not any(opcode + b"\xf3\xff\xff\xff" in setup_bytes
+                           for opcode in (b"\xc7\x45\xf7", b"\xba")):
+                    continue
+                for method_slot in (0x1C0, 0x1D0):
+                    entry = vtable + method_slot
+                    if vtable % 8 or not ro_rva <= vtable <= entry <= ro_rva + ro_size - 8:
+                        continue
+                    method = image.read("Q", ro_offset + entry - ro_rva) - image.image_base
+                    if not rva <= method < ranges.get(method, 0) <= rva + len(code):
+                        continue
+                    for resolve in resolve_pattern.finditer(code, method - rva, ranges[method] - rva):
+                        style_import = rva + resolve.end(1) + struct.unpack("<i", resolve[1])[0]
+                        if (resolve[3] != assignment[2] or imports.get(style_import)
+                                != "?kInvalidV8StyleEntryId@core@@3VCompositeID@1@B"):
+                            continue
+                        yield {
+                            "registration": f"0x{record:X}",
+                            "factory": f"0x{factory:X}",
+                            "nonzero_branch": f"0x{target:X}",
+                            "constructor": f"0x{constructor:X}",
+                            "vtable": f"0x{vtable:X}",
+                            "allocation_size": struct.unpack("<I", setup[1])[0],
+                            "field_offset": f"0x{struct.unpack('<I', assignment[2])[0]:X}",
+                            "style_key": -13,
+                            "method_slot": f"0x{method_slot:X}",
+                            "resolver_slot": f"0x{struct.unpack('<I', resolve[2])[0]:X}",
+                            "field_load": f"0x{rva + resolve.start(3) - 3:X}",
+                        }
 
 
 def search_label_candidates(image, rva, code, reference_render):
@@ -553,6 +625,7 @@ def compare(directory, signatures):
                 image, rva, code, windows["dropdown_descriptors"]))
             summary["search_label_candidates"] = list(search_label_candidates(
                 image, rva, code, windows["search_label_render"]))
+            summary["search_grid_candidates"] = list(search_grid_candidates(image, rva, code))
         elif name == "grphcs.dll":
             imports = {slot: symbol for dll, symbol, slot in image.imports()
                        if dll == "cairo.dll"

@@ -38,6 +38,12 @@ if /i "%~2"=="scroller-probe" (
     set "THEME_DLL_NAME=scroller-identity-probe.dll"
     set "THEME_LAUNCHER_NAME=scroller-probe-run.exe"
 )
+if /i "%~2"=="png-surface-probe" (
+    set "THEME_SOURCE=png_surface_probe.cpp"
+    set "THEME_LAUNCHER_SOURCE=png_surface_probe_launcher.cpp"
+    set "THEME_DLL_NAME=scroller-png-surface-probe.dll"
+    set "THEME_LAUNCHER_NAME=png-surface-probe-run.exe"
+)
 if /i "%~2"=="dock-probe" (
     set "THEME_SOURCE=dock_fill_probe.cpp"
     set "THEME_LAUNCHER_SOURCE=dock_probe_launcher.cpp"

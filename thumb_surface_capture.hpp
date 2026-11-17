@@ -8,6 +8,7 @@
 
 namespace thumb_surface_capture {
 using Stage = ThumbSurfaceStage;
+using CacheCounter = ThumbCacheCounter;
 inline constexpr ULONGLONG snapshotWaitMs = 100;
 inline constexpr ULONG_PTR drawFrame = 0x730, paintFrame = 0x8A0, ownerFrame = 0x9F0;
 inline constexpr ULONG_PTR imageDrawFrame = 0x660; // imageui AC50 returns to 90AB.
@@ -48,7 +49,53 @@ inline Stage delegatedFrames(panel_detail::Reader& r, ULONG_PTR h, ULONG_PTR wba
     return Stage::DelegatedFrames;
 }
 
-inline Stage locatePaint(ULONG_PTR h, const Images& b, ThumbSurfaceIdentity& id)
+struct CacheObservation {
+    CacheCounter gate{CacheCounter::Count}, methods{CacheCounter::Count};
+};
+
+inline Stage checkCache(panel_detail::Reader& r, ULONG_PTR h, ULONG_PTR component, ULONG_PTR imageUi,
+                        CacheObservation& cache)
+{
+    const auto deny = [&](CacheCounter reason, Stage stage = Stage::Cache) {
+        cache.gate = reason;
+        return stage;
+    };
+    ULONG_PTR cached{}, qi{}, drawingObject{}, rasterQi{}, rasterTable{}, qiTable{}, drawMethod{}, rasterMethod{};
+    if (!r.read(component, 0x28, cached) || !r.stack(h, drawFrame + 0x80, qi) ||
+        !r.stack(h, imageDrawFrame - 0x28, drawingObject) || !r.stack(h, imageDrawFrame - 0x160, rasterQi))
+        return deny(CacheCounter::InputsReadFailure, Stage::ReadFailure);
+    // The resolved imageui drawing interface is at +8 in its wrapper. The
+    // component's image.dll cache and the converted Cairo surface can be separate objects.
+    if (!cached) return deny(CacheCounter::NullCache);
+    if (qi <= 8) return deny(CacheCounter::InvalidDrawQi);
+    if (drawingObject != qi - 8) return deny(CacheCounter::DrawingObjectMismatch);
+    if (!rasterQi) return deny(CacheCounter::NullRasterQi);
+
+    // imageui AE04 preserves the raster QI interface, and AE0B dereferences it.
+    if (!r.read(qi, 0, qiTable) || !r.read(rasterQi, 0, rasterTable))
+        return deny(CacheCounter::TablesReadFailure, Stage::ReadFailure);
+    const bool originalDraw = qiTable == imageUi + 0x14218;
+    const bool originalRaster = rasterTable == imageUi + 0x13D08;
+    if ((!originalDraw && qiTable != imageUi + 0x14090) ||
+        (!originalRaster && rasterTable != imageUi + 0x13C80)) return deny(CacheCounter::UnknownPair);
+    const bool original = originalDraw && originalRaster;
+    cache.gate = original ? CacheCounter::OriginalPair : originalDraw ? CacheCounter::AlternateRasterPair :
+        originalRaster ? CacheCounter::AlternateDrawPair : CacheCounter::AlternateBothPair;
+
+    // Only the four pinned pairs warrant a guarded method-slot read. Alternate
+    // pairs are counted even when the methods match; only the original is admitted.
+    if (!r.read(qiTable, 0x18, drawMethod) || !r.read(rasterTable, 0x18, rasterMethod)) {
+        cache.methods = CacheCounter::MethodsReadFailure;
+        return original ? Stage::ReadFailure : Stage::Cache;
+    }
+    const bool drawMatches = drawMethod == imageUi + 0x8FE0;
+    const bool rasterMatches = rasterMethod == imageUi + 0x6340;
+    cache.methods = drawMatches ? (rasterMatches ? CacheCounter::MethodsMatch : CacheCounter::WrongRasterMethod) :
+        (rasterMatches ? CacheCounter::WrongDrawMethod : CacheCounter::WrongBothMethods);
+    return original && drawMatches && rasterMatches ? Stage::Accepted : Stage::Cache;
+}
+
+inline Stage locatePaint(ULONG_PTR h, const Images& b, ThumbSurfaceIdentity& id, CacheObservation& cache)
 {
     using panel_detail::limit;
     if (!b.frame || b.frame > limit - 0xABEDB0 || !b.graphics || b.graphics > limit - 0xC7BE0 ||
@@ -128,18 +175,7 @@ inline Stage locatePaint(ULONG_PTR h, const Images& b, ThumbSurfaceIdentity& id)
     if (id.drawReturnRva != 0x19ED0 && (id.drawReturnRva >= 0x19FAD) != (id.orientation != 0))
         return Stage::Orientation;
 
-    ULONG_PTR cached{}, qi{}, drawingObject{}, rasterQi{}, rasterTable{}, qiTable{}, drawMethod{}, rasterMethod{};
-    if (!r.read(component, 0x28, cached) || !r.stack(h, drawFrame + 0x80, qi) ||
-        !r.stack(h, imageDrawFrame - 0x28, drawingObject) || !r.stack(h, imageDrawFrame - 0x160, rasterQi))
-        return Stage::ReadFailure;
-    // The resolved imageui drawing interface is at +8 in its wrapper. The
-    // component's image.dll cache and the converted Cairo surface can be separate objects.
-    if (!cached || qi <= 8 || drawingObject != qi - 8 || !rasterQi) return Stage::Cache;
-    // imageui AE04 preserves the raster QI interface, and AE0B dereferences it.
-    if (!r.read(qi, 0, qiTable) || !r.read(rasterQi, 0, rasterTable)) return Stage::ReadFailure;
-    if (qiTable != b.imageUi + 0x14218 || rasterTable != b.imageUi + 0x13D08) return Stage::Cache;
-    if (!r.read(qiTable, 0x18, drawMethod) || !r.read(rasterTable, 0x18, rasterMethod)) return Stage::ReadFailure;
-    if (drawMethod != b.imageUi + 0x8FE0 || rasterMethod != b.imageUi + 0x6340) return Stage::Cache;
+    if (const auto stage = checkCache(r, h, component, b.imageUi, cache); stage != Stage::Accepted) return stage;
 
     BYTE enabled{}, interactive{}, parentInteractive{};
     if (!r.read(config, 0x70, enabled) || !r.stack(h, paintFrame + 0x28, interactive) ||
@@ -226,9 +262,12 @@ inline Stage readSurface(const scroller_png::CairoApi& api, const void* surface,
     return Stage::Accepted;
 }
 
-inline void record(Stage stage, const ThumbSurfaceIdentity& id)
+inline void record(Stage stage, const ThumbSurfaceIdentity& id, const CacheObservation& cache)
 {
     ++observations.stages[static_cast<size_t>(stage)];
+    for (const auto counter : {cache.gate, cache.methods}) {
+        if (counter != CacheCounter::Count) ++observations.cacheCounters[static_cast<size_t>(counter)];
+    }
     if (stage != Stage::Accepted) return;
     size_t index{};
     while (index < observations.sampleCount && !(observations.samples[index].identity == id)) ++index;
@@ -255,10 +294,11 @@ inline void observe(ULONG_PTR h, void* surface, const scroller_png_hook::Binding
     }
     if (active(end)) {
         ThumbSurfaceIdentity id{};
-        auto stage = locatePaint(h, images, id);
+        CacheObservation cache;
+        auto stage = locatePaint(h, images, id, cache);
         if (stage == Stage::Accepted && active(end)) stage = readSurface(binding.api, surface, id);
         // An accessor already in progress at expiry cannot publish a sample.
-        if (active(end)) record(stage, id);
+        if (active(end)) record(stage, id, cache);
     }
     ReleaseSRWLockExclusive(&collectorLock);
 }
@@ -272,6 +312,7 @@ inline DWORD copySamples(ThumbSurfaceTrace& trace)
     }
     trace.sampleCount = observations.sampleCount;
     trace.stages = observations.stages;
+    trace.cacheCounters = observations.cacheCounters;
     trace.samples = observations.samples;
     trace.busyDrops = busyDrops.load(std::memory_order_relaxed);
     trace.capacityDrops = observations.capacityDrops;

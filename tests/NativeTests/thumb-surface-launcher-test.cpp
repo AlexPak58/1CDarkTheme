@@ -160,6 +160,7 @@ void testTrace()
 {
     ThumbSurfaceTrace trace{};
     using Stage = ThumbSurfaceStage;
+    using Counter = ThumbCacheCounter;
     const std::array routeStages{
         std::pair{Stage::DrawReturn, "drawReturn"}, std::pair{Stage::DelegatedDraw, "delegatedDraw"},
         std::pair{Stage::DelegatedFrames, "delegatedFrames"}, std::pair{Stage::PaintReturn, "paintReturn"},
@@ -172,11 +173,17 @@ void testTrace()
         require(std::string_view(thumbStageNames[index]) == label, "route rejection has the matching JSON key");
         trace.stages[index] = index + 1;
     }
+    const auto count = [&](Counter counter) -> ULONGLONG& { return trace.cacheCounters[static_cast<size_t>(counter)]; };
+    auto& original = count(Counter::OriginalPair);
+    auto& methodsMatch = count(Counter::MethodsMatch);
+    const auto thumbPresent = thumbStage(trace, Stage::ThumbPresent);
+    original = methodsMatch = thumbPresent;
     require(validThumbTrace(trace), "route rejection counters alone are valid without accepted samples");
     auto& accepted = trace.stages[static_cast<size_t>(ThumbSurfaceStage::Accepted)];
     auto& sample = trace.samples[0];
     auto& id = sample.identity;
     trace.sampleCount = 1; accepted = sample.calls = 2;
+    original = methodsMatch = thumbPresent + accepted;
     id = {0xABEDB0, 0x3CA78, 0x50, 0x1A030, 1, 5, 0, 2, 1, 1, 0, 0,
           0, 0, 20, 50, 1, 2, 10, 15, 0, 1, 13, 17, 52, 0, 1, 1, 0, 0};
     require(validThumbTrace(trace), "valid horizontal image metadata accepted");
@@ -189,6 +196,7 @@ void testTrace()
     id.scrollerTableRva = 0x3CD00; require(!validThumbTrace(trace), "rejects mismatched owners"); id.scrollerTableRva = 0x3CA78;
     trace.samples[1] = sample;
     trace.sampleCount = 2; accepted = 4;
+    original = methodsMatch = thumbPresent + accepted;
     require(!validThumbTrace(trace), "rejects duplicate groups");
     trace.sampleCount = 1; accepted = 3; trace.capacityDrops = 1;
     require(!validThumbTrace(trace), "capacity drops require full buffer");
@@ -198,14 +206,15 @@ void testTrace()
         trace.samples[i].identity.right += static_cast<LONG>(i);
     }
     trace.sampleCount = static_cast<DWORD>(thumbSurfaceCapacity); accepted = thumbSurfaceCapacity + 2;
+    original = methodsMatch = thumbPresent + accepted;
     require(validThumbTrace(trace), "full capture accounts for exact capacity drops");
     --accepted;
     require(!validThumbTrace(trace), "aggregate accepted counts must match rows and loss");
-    ++accepted; trace.version = 1;
-    require(!validThumbTrace(trace), "rejects version 1 payload");
+    ++accepted; trace.version = 2;
+    require(!validThumbTrace(trace), "rejects version 2 payload");
     trace.version = thumbSurfaceProbeVersion;
-    trace.size = 18576;
-    require(!validThumbTrace(trace), "rejects version 1 payload size");
+    trace.size = 18640;
+    require(!validThumbTrace(trace), "rejects version 2 payload size");
     trace.size = static_cast<DWORD>(sizeof(trace) - sizeof(trace.stages[0]));
     require(!validThumbTrace(trace), "rejects a payload missing one stage counter");
 
@@ -224,6 +233,58 @@ void testTrace()
     require(coverage.complete(), "all orientation-specific pieces complete without optional shared piece");
     addPieces(thumbSharedPiece);
     require(coverage.complete(), "optional shared piece does not invalidate complete coverage");
+}
+
+void testCacheCounters()
+{
+    ThumbSurfaceTrace trace;
+    using Stage = ThumbSurfaceStage;
+    using Counter = ThumbCacheCounter;
+    const auto count = [&](Counter counter) -> ULONGLONG& { return trace.cacheCounters[static_cast<size_t>(counter)]; };
+    auto& cache = trace.stages[static_cast<size_t>(Stage::Cache)];
+    auto& readFailures = trace.stages[static_cast<size_t>(Stage::ReadFailure)];
+    const std::array cacheKeys{
+        std::pair{Counter::InputsReadFailure, "inputsReadFailure"}, std::pair{Counter::NullCache, "nullCache"},
+        std::pair{Counter::InvalidDrawQi, "invalidDrawQi"}, std::pair{Counter::DrawingObjectMismatch, "drawingObjectMismatch"},
+        std::pair{Counter::NullRasterQi, "nullRasterQi"}, std::pair{Counter::TablesReadFailure, "tablesReadFailure"},
+        std::pair{Counter::OriginalPair, "originalPair"}, std::pair{Counter::AlternateDrawPair, "alternateDrawPair"},
+        std::pair{Counter::AlternateRasterPair, "alternateRasterPair"}, std::pair{Counter::AlternateBothPair, "alternateBothPair"},
+        std::pair{Counter::UnknownPair, "unknownPair"}, std::pair{Counter::MethodsReadFailure, "methodsReadFailure"},
+        std::pair{Counter::WrongDrawMethod, "wrongDrawMethod"}, std::pair{Counter::WrongRasterMethod, "wrongRasterMethod"},
+        std::pair{Counter::WrongBothMethods, "wrongBothMethods"}, std::pair{Counter::MethodsMatch, "methodsMatch"}
+    };
+    for (const auto& [counter, key] : cacheKeys)
+        require(std::string_view(thumbCacheNames[static_cast<size_t>(counter)]) == key, "cache diagnostic maps to its JSON key");
+
+    // Four basic rejections, three alternate pairs, one unknown pair and one
+    // original with mismatched methods. The remaining original pair failed a read.
+    cache = 9;
+    readFailures = 3;
+    for (const auto counter : {Counter::InputsReadFailure, Counter::NullCache, Counter::InvalidDrawQi,
+                              Counter::DrawingObjectMismatch, Counter::NullRasterQi, Counter::TablesReadFailure,
+                              Counter::AlternateDrawPair, Counter::AlternateRasterPair, Counter::AlternateBothPair,
+                              Counter::UnknownPair, Counter::WrongDrawMethod, Counter::WrongRasterMethod}) count(counter) = 1;
+    count(Counter::OriginalPair) = 2;
+    count(Counter::MethodsReadFailure) = 3;
+    // One alternate mismatch and two alternate read failures. The remaining
+    // method read failure necessarily came from the original pair.
+    require(validThumbTrace(trace), "consistent cache gate, pair and method counts admitted");
+    --cache;
+    require(!validThumbTrace(trace), "stage must account for the reported original method mismatch or original read failure");
+    ++cache;
+    --readFailures;
+    require(!validThumbTrace(trace), "original method read failures must fit the stage read failure budget");
+    ++readFailures;
+    ++count(Counter::MethodsMatch);
+    require(!validThumbTrace(trace), "known pairs and method outcomes have equal totals");
+    --count(Counter::MethodsMatch);
+    count(Counter::OriginalPair) = (std::numeric_limits<ULONGLONG>::max)();
+    require(!validThumbTrace(trace), "overflowing known pair count rejected");
+
+    trace = {};
+    trace.snapshotError = ERROR_TIMEOUT;
+    count(Counter::OriginalPair) = count(Counter::MethodsMatch) = 1;
+    require(!validThumbTrace(trace), "failed snapshot cannot carry cache diagnostic data");
 }
 
 void testImages(const std::wstring& diagnostic, const std::wstring& normal)
@@ -256,9 +317,10 @@ void testImages(const std::wstring& diagnostic, const std::wstring& normal)
         const auto mapped = GetModuleHandleW(diagnostic.c_str());
         const auto run = mapped ? reinterpret_cast<ULONG_PTR>(GetProcAddress(mapped, thumbSurfaceRunExport)) : 0;
         require(run && thumbMappedRun(GetCurrentProcess(), image, theme) == run,
-                "mapped diagnostic v10 and probe v2 exports agree with trusted PE");
-        require(!GetProcAddress(mapped, "RunThumbSurfaceProbeV1") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV1"),
-                "diagnostic DLL advertises only probe v2");
+                "mapped diagnostic v10 and probe v3 exports agree with trusted PE");
+        require(!GetProcAddress(mapped, "RunThumbSurfaceProbeV1") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV1") &&
+                !GetProcAddress(mapped, "RunThumbSurfaceProbeV2") && !GetProcAddress(mapped, "ThumbSurfaceProbeAbiV2"),
+                "diagnostic DLL advertises only probe v3");
         auto wrong = theme;
         ++wrong.size;
         require(!thumbMappedRun(GetCurrentProcess(), image, wrong), "wrong mapped image size rejected");
@@ -273,6 +335,7 @@ int wmain(int argc, wchar_t** argv)
     testIat();
     testPayload();
     testTrace();
+    testCacheCounters();
     testImages(std::filesystem::absolute(argv[1]).wstring(), std::filesystem::absolute(argv[2]).wstring());
     std::puts("PASS: thumb probe CLI, module identity, IAT pre/post, payload lifetime and bounded metadata");
 }

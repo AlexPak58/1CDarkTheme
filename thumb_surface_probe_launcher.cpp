@@ -225,6 +225,70 @@ constexpr std::array thumbStageNames{
 };
 static_assert(thumbStageNames.size() == static_cast<size_t>(ThumbSurfaceStage::Count));
 
+constexpr std::array thumbCacheNames{
+    "inputsReadFailure", "nullCache", "invalidDrawQi", "drawingObjectMismatch", "nullRasterQi", "tablesReadFailure",
+    "originalPair", "alternateDrawPair", "alternateRasterPair", "alternateBothPair", "unknownPair",
+    "methodsReadFailure", "wrongDrawMethod", "wrongRasterMethod", "wrongBothMethods", "methodsMatch"
+};
+static_assert(thumbCacheNames.size() == static_cast<size_t>(ThumbCacheCounter::Count));
+
+bool validThumbCacheCounters(const ThumbSurfaceTrace& trace)
+{
+    using Counter = ThumbCacheCounter;
+    using Stage = ThumbSurfaceStage;
+    const auto count = [&](Counter counter) { return trace.cacheCounters[static_cast<size_t>(counter)]; };
+    const auto subtract = [](ULONGLONG& remaining, ULONGLONG value) {
+        if (value > remaining) return false;
+        remaining -= value;
+        return true;
+    };
+
+    // Every early predicate rejection, unknown pair and alternate pair is Cache.
+    // Any remaining Cache calls must be original-pair method mismatches.
+    auto originalWrong = thumbStage(trace, Stage::Cache);
+    for (const auto counter : {Counter::NullCache, Counter::InvalidDrawQi, Counter::DrawingObjectMismatch,
+                              Counter::NullRasterQi, Counter::UnknownPair}) {
+        if (!subtract(originalWrong, count(counter))) return false;
+    }
+    const auto beforeAlternates = originalWrong;
+    for (const auto counter : {Counter::AlternateDrawPair, Counter::AlternateRasterPair, Counter::AlternateBothPair}) {
+        if (!subtract(originalWrong, count(counter))) return false;
+    }
+    const auto alternates = beforeAlternates - originalWrong;
+    auto originalRemaining = count(Counter::OriginalPair);
+    if (!subtract(originalRemaining, originalWrong) ||
+        count(Counter::OriginalPair) > (std::numeric_limits<ULONGLONG>::max)() - alternates)
+        return false;
+
+    // Each known pair records exactly one method outcome, without multiplying
+    // or summing the untrusted counters before checking their bounds.
+    auto remaining = count(Counter::OriginalPair) + alternates;
+    const auto knownPairs = remaining;
+    for (const auto counter : {Counter::WrongDrawMethod, Counter::WrongRasterMethod, Counter::WrongBothMethods}) {
+        if (!subtract(remaining, count(counter))) return false;
+    }
+    auto alternateWrong = knownPairs - remaining;
+    if (!subtract(alternateWrong, originalWrong) || alternateWrong > alternates ||
+        !subtract(remaining, count(Counter::MethodsReadFailure)) || remaining != count(Counter::MethodsMatch)) return false;
+
+    const auto alternateReadLimit = alternates - alternateWrong;
+    const auto methodsRead = count(Counter::MethodsReadFailure);
+    const auto originalReadMin = methodsRead > alternateReadLimit ? methodsRead - alternateReadLimit : 0;
+    auto readFailures = thumbStage(trace, Stage::ReadFailure);
+    if (!subtract(readFailures, count(Counter::InputsReadFailure)) ||
+        !subtract(readFailures, count(Counter::TablesReadFailure)) || !subtract(readFailures, originalReadMin) ||
+        !subtract(originalRemaining, originalReadMin)) return false;
+
+    // These stages can only occur after an admitted original pair.
+    for (const auto stage : {Stage::State, Stage::ThumbPresent, Stage::SurfaceError, Stage::SurfaceType,
+                             Stage::InvalidMetrics, Stage::Accepted}) {
+        if (!subtract(originalRemaining, thumbStage(trace, stage))) return false;
+    }
+    // Geometry and guarded reads also reject after the cache gate, but share
+    // stage counters with earlier checks. Those counters bound the remainder.
+    return originalRemaining <= readFailures || originalRemaining - readFailures <= thumbStage(trace, Stage::Owner);
+}
+
 bool validThumbTrace(const ThumbSurfaceTrace& trace)
 {
     if (trace.size != sizeof(trace) || trace.version != thumbSurfaceProbeVersion || trace.reserved ||
@@ -235,7 +299,10 @@ bool validThumbTrace(const ThumbSurfaceTrace& trace)
         if (trace.sampleCount || trace.busyDrops || trace.capacityDrops) return false;
         for (const auto count : trace.stages)
             if (count) return false;
+        for (const auto count : trace.cacheCounters)
+            if (count) return false;
     }
+    if (!validThumbCacheCounters(trace)) return false;
     auto remaining = thumbStage(trace, ThumbSurfaceStage::Accepted);
     for (DWORD i = 0; i < trace.sampleCount; ++i) {
         const auto& row = trace.samples[i];
@@ -286,6 +353,9 @@ void printThumbTrace(const ThumbSurfaceTrace& trace, DWORD pid, ULONGLONG creati
                 static_cast<DWORD>(PAGE_READONLY), trace.busyDrops, trace.capacityDrops);
     for (size_t i = 0; i < thumbStageNames.size(); ++i)
         std::printf("%s\"%s\":%llu", i ? "," : "", thumbStageNames[i], trace.stages[i]);
+    std::fputs("},\"cacheDiagnostics\":{", stdout);
+    for (size_t i = 0; i < thumbCacheNames.size(); ++i)
+        std::printf("%s\"%s\":%llu", i ? "," : "", thumbCacheNames[i], trace.cacheCounters[i]);
     std::fputs("},\"samples\":[", stdout);
     ThumbCoverage coverage;
     for (DWORD i = 0; i < trace.sampleCount; ++i) {

@@ -10,9 +10,13 @@ namespace {
 void* iatPage{};
 inline constexpr ULONG_PTR fixtureIatRva = 0xC7BE0;
 bool poisonQuery{};
+LPCVOID deniedQuery{}, watchedQuery{};
+size_t watchedQueries{};
 
 SIZE_T WINAPI fixtureQuery(LPCVOID address, PMEMORY_BASIC_INFORMATION region, SIZE_T size)
 {
+    if (address == watchedQuery) ++watchedQueries;
+    if (address == deniedQuery) return 0;
     const auto result = VirtualQuery(address, region, size);
     if (result && iatPage && address == iatPage) {
         region->Type = MEM_IMAGE;
@@ -140,6 +144,8 @@ struct Fixture {
         put(drawingObject, 8, iu + 0x14218);
         put(*imageUi, 0x14218 + 0x18, iu + 0x8FE0);
         put(*imageUi, 0x13D08 + 0x18, iu + 0x6340);
+        put(*imageUi, 0x14090 + 0x18, iu + 0x8FE0);
+        put(*imageUi, 0x13C80 + 0x18, iu + 0x6340);
         state(1, 1, 0, 0, 0);
     }
 
@@ -153,10 +159,16 @@ struct Fixture {
         put(component, 0x30, value);
     }
 
+    Stage locate(ThumbSurfaceIdentity& id)
+    {
+        CacheObservation cache;
+        return locatePaint(ptr(stack), routes, id, cache);
+    }
+
     void expect(Stage expected, const char* name)
     {
         ThumbSurfaceIdentity id{};
-        check(locatePaint(ptr(stack), routes, id) == expected, name);
+        check(locate(id) == expected, name);
     }
 };
 
@@ -167,13 +179,13 @@ void testRoutes(Fixture& f)
         const DWORD componentOffset = vertical ? 0x40 : 0x50;
         f.route(draw, componentOffset);
         ThumbSurfaceIdentity id{};
-        check(locatePaint(ptr(f.stack), f.routes, id) == Stage::Accepted && id.drawReturnRva == draw &&
+        check(f.locate(id) == Stage::Accepted && id.drawReturnRva == draw &&
             id.componentOffset == componentOffset && id.orientation == (vertical ? 0UL : 1UL) &&
             id.windowTableRva == 0xABEDB0 && id.scrollerTableRva == 0x3CA78 && id.left == -30 &&
             id.thumbLeft == -29 && id.thumbBottom == 20, "all seven editor draws and both coordinate sets");
         if (vertical) {
             f.route(draw, 0x40, true);
-            check(locatePaint(ptr(f.stack), f.routes, id) == Stage::Accepted && id.windowTableRva == 0xA885D0 &&
+            check(f.locate(id) == Stage::Accepted && id.windowTableRva == 0xA885D0 &&
                 id.scrollerTableRva == 0x3CD00, "vertical tree draws");
         }
     }
@@ -245,7 +257,9 @@ void testRoutes(Fixture& f)
     f.state(1, 1, 0, 0, 0); put(f.stack, ownerFrame + 0x28, BYTE{0});
     f.expect(Stage::State, "incoming interaction byte must match");
     ThumbSurfaceIdentity id{};
-    check(locatePaint(1, f.routes, id) == Stage::ReadFailure, "unreadable stack denied");
+    CacheObservation cache;
+    check(locatePaint(1, f.routes, id, cache) == Stage::ReadFailure && cache.gate == CacheCounter::Count,
+        "unreadable stack denied before cache diagnostics");
 }
 
 void testMetadata(Fixture& f)
@@ -302,6 +316,102 @@ void testMetadata(Fixture& f)
 
 ULONGLONG hits(const ThumbSurfaceTrace& t, Stage stage) { return t.stages[static_cast<size_t>(stage)]; }
 
+void testCacheDiagnostics(Fixture& f)
+{
+    using Counter = CacheCounter;
+    const auto iu = f.routes.imageUi;
+    images = f.routes;
+    armedBinding = &f.binding;
+    f.binding.api.status = markImageGetter;
+    deadline.store(GetTickCount64() + thumbSurfaceCaptureMs);
+    const auto expect = [&](Stage stage, Counter gate, Counter methods, const char* reason) {
+        const auto previous = observations;
+        imageGetterCalled = false;
+        observe(ptr(f.stack), &f.surface, f.binding);
+        check(hits(observations, stage) == hits(previous, stage) + 1 &&
+            imageGetterCalled == (stage == Stage::Accepted), reason);
+        auto expectedCounters = previous.cacheCounters;
+        if (gate != Counter::Count) ++expectedCounters[static_cast<size_t>(gate)];
+        if (methods != Counter::Count) ++expectedCounters[static_cast<size_t>(methods)];
+        check(observations.cacheCounters == expectedCounters, reason);
+    };
+    const auto tables = [&](ULONG_PTR draw, ULONG_PTR raster) {
+        f.route();
+        put(f.drawingObject, 8, iu + draw);
+        f.rasterInterface = iu + raster;
+    };
+
+    tables(0x14218, 0x13D08);
+    expect(Stage::Accepted, Counter::OriginalPair, Counter::MethodsMatch, "only the original known pair reaches Cairo");
+    tables(0x14090, 0x13D08);
+    expect(Stage::Cache, Counter::AlternateDrawPair, Counter::MethodsMatch, "alternate draw pair matches methods but never reaches Cairo");
+    tables(0x14218, 0x13C80);
+    expect(Stage::Cache, Counter::AlternateRasterPair, Counter::MethodsMatch, "alternate raster pair matches methods but never reaches Cairo");
+    tables(0x14090, 0x13C80);
+    expect(Stage::Cache, Counter::AlternateBothPair, Counter::MethodsMatch, "dual alternate pair matches methods but never reaches Cairo");
+
+    auto* guard = static_cast<BYTE*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE | PAGE_GUARD));
+    check(guard != nullptr, "allocate unknown-table guard fixture");
+    f.route();
+    put(f.drawingObject, 8, reinterpret_cast<ULONG_PTR>(guard));
+    watchedQuery = guard + 0x18;
+    expect(Stage::Cache, Counter::UnknownPair, Counter::Count, "unknown pair is classified without reading its table");
+    check(!watchedQueries, "unknown table method slot was not queried");
+    watchedQuery = nullptr;
+    check(VirtualFree(guard, 0, MEM_RELEASE), "free unknown-table guard fixture");
+
+    f.route();
+    put(f.component, 0x28, ULONG_PTR{0});
+    expect(Stage::Cache, Counter::NullCache, Counter::Count, "null cache separated");
+    f.route();
+    put(f.stack, drawFrame + 0x80, ULONG_PTR{8});
+    expect(Stage::Cache, Counter::InvalidDrawQi, Counter::Count, "invalid draw QI separated");
+    f.route();
+    ++f.stack[0x638 / 8];
+    expect(Stage::Cache, Counter::DrawingObjectMismatch, Counter::Count, "wrong drawing object separated");
+    f.route();
+    put(f.stack, 0x500, ULONG_PTR{0});
+    expect(Stage::Cache, Counter::NullRasterQi, Counter::Count, "null raster QI separated");
+    f.route();
+    put(f.stack, 0x500, ULONG_PTR{1});
+    expect(Stage::ReadFailure, Counter::TablesReadFailure, Counter::Count, "guarded table read failure separated");
+    panel_detail::Reader reader;
+    CacheObservation cache;
+    check(checkCache(reader, ptr(f.stack), 0, iu, cache) == Stage::ReadFailure &&
+        cache.gate == Counter::InputsReadFailure && cache.methods == Counter::Count, "guarded input read failure separated");
+
+    f.route();
+    deniedQuery = reinterpret_cast<LPCVOID>(iu + 0x14218 + 0x18);
+    expect(Stage::ReadFailure, Counter::OriginalPair, Counter::MethodsReadFailure, "original method read failure keeps ReadFailure");
+    tables(0x14090, 0x13C80);
+    deniedQuery = reinterpret_cast<LPCVOID>(iu + 0x14090 + 0x18);
+    expect(Stage::Cache, Counter::AlternateBothPair, Counter::MethodsReadFailure, "alternate method read failure keeps Cache");
+    deniedQuery = nullptr;
+
+    f.route();
+    ++(*f.imageUi)[(0x14218 + 0x18) / 8];
+    expect(Stage::Cache, Counter::OriginalPair, Counter::WrongDrawMethod, "wrong draw method separated");
+    f.route();
+    ++(*f.imageUi)[(0x13D08 + 0x18) / 8];
+    expect(Stage::Cache, Counter::OriginalPair, Counter::WrongRasterMethod, "wrong raster method separated");
+    ++(*f.imageUi)[(0x14218 + 0x18) / 8];
+    expect(Stage::Cache, Counter::OriginalPair, Counter::WrongBothMethods, "both wrong methods separated");
+
+    tables(0x14090, 0x13C80);
+    ++f.window[0xB8 / 8];
+    expect(Stage::Owner, Counter::Count, Counter::Count, "owner must match before pair classification");
+    tables(0x14090, 0x13C80);
+    ++f.stack[(paintFrame - 0x18) / 8];
+    expect(Stage::Component, Counter::Count, Counter::Count, "component must match before pair classification");
+
+    deadline.store(0);
+    ThumbSurfaceTrace snapshot;
+    check(copySamples(snapshot) == ERROR_SUCCESS && snapshot.cacheCounters == observations.cacheCounters &&
+        snapshot.sampleCount == 1 && snapshot.samples[0].calls == 1, "snapshot retains diagnostics and only the original sample");
+    observations = {};
+    f.binding.api.status = f.api.status;
+}
+
 void testCapture(Fixture& f)
 {
     f.route();
@@ -339,11 +449,11 @@ void testCapture(Fixture& f)
 void testRunBoundaries()
 {
     ThumbSurfaceTrace trace{};
-    trace.version = 1;
+    trace.version = 2;
     check(run(&trace) == ERROR_INVALID_PARAMETER && !attempted && !deadline.load(), "bad ABI does not consume one-shot");
     trace = {};
-    trace.size -= 8;
-    check(run(&trace) == ERROR_INVALID_PARAMETER && !attempted, "incorrect buffer size rejected");
+    trace.size = 18640;
+    check(run(&trace) == ERROR_INVALID_PARAMETER && !attempted, "legacy v2 buffer size rejected");
     trace = {};
     void* page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     check(page != nullptr, "allocate undersized buffer");
@@ -452,6 +562,7 @@ int main()
     testRunBoundaries();
     testRoutes(f);
     testMetadata(f);
+    testCacheDiagnostics(f);
     testCapture(f);
     testBindingStatus();
     testDiagnosticWrapper(f);

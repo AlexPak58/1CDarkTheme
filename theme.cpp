@@ -1,6 +1,7 @@
 #include "platform.hpp"
 #include "attach_process.hpp"
 #include "list_identity.hpp"
+#include "devtool_binding.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -73,6 +74,20 @@ std::array<std::optional<ThemeProfile>, 1024> profileHistory;
 size_t profileCount{};
 std::atomic<const ThemeProfile*> activeProfile{&disabledProfile};
 DWORD installationResult = ERROR_NOT_READY;
+
+void redrawSearchResults() noexcept
+{
+    const DWORD pid = GetCurrentProcessId();
+    const auto target = findDesignerMainWindow(pid);
+    if (target.window && !IsIconic(target.window) && designerMainWindow(target.window, pid) == target)
+        RedrawWindow(target.window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
+constexpr devtool_detail::BindingOps bindingOps{
+    CreateThreadpoolTimer, SetThreadpoolTimer, GetTickCount64,
+    devtool_detail::inspectLoadedModule, redrawSearchResults
+};
+devtool_detail::Binding devtoolBinding(installationLock, bindingOps);
 
 using CaptionTarget = DesignerWindow;
 
@@ -161,11 +176,20 @@ DWORD replaceRgb(DWORD value, DWORD rgb)
 ULONG_PTR callerAt(const CONTEXT& registers, ULONG_PTR offset)
 {
     const auto* stack = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+    const auto bottom = reinterpret_cast<ULONG_PTR>(stack->StackLimit);
+    if (registers.Rsp < bottom || offset > (std::numeric_limits<ULONG_PTR>::max)() - registers.Rsp)
+        return 0;
     const auto location = registers.Rsp + offset;
     const auto top = reinterpret_cast<ULONG_PTR>(stack->StackBase);
-    if (location < reinterpret_cast<ULONG_PTR>(stack->StackLimit) ||
-        location > top - sizeof(ULONG_PTR)) return 0;
-    return *reinterpret_cast<const ULONG_PTR*>(location);
+    if (top < sizeof(ULONG_PTR) || location > top - sizeof(ULONG_PTR) || location % alignof(ULONG_PTR))
+        return 0;
+    __try {
+        return *reinterpret_cast<const ULONG_PTR*>(location);
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
+                GetExceptionCode() == EXCEPTION_IN_PAGE_ERROR ?
+                EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        return 0;
+    }
 }
 
 ListKind listKindAt(const CONTEXT& registers, ULONG_PTR paintReturnSlot)
@@ -175,8 +199,9 @@ ListKind listKindAt(const CONTEXT& registers, ULONG_PTR paintReturnSlot)
 
     // The paint prologue saves the dispatcher's RDI (receiver + 0x100).
     const auto savedRdi = callerAt(registers, paintReturnSlot - 0x20);
-    return savedRdi > 0x100 ? classifyListControl(savedRdi - 0x100, frameBase, frontendBase) :
-                             ListKind::Unknown;
+    return savedRdi > 0x100 ?
+        classifyListControl(savedRdi - 0x100, frameBase, frontendBase, devtoolBinding.base()) :
+        ListKind::Unknown;
 }
 
 DWORD listColor(ListKind kind, DWORD original, ULONG_PTR zones,
@@ -312,6 +337,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     const auto& event = *exception->ExceptionRecord;
     if (event.ExceptionCode != EXCEPTION_BREAKPOINT) return EXCEPTION_CONTINUE_SEARCH;
 
+    const auto lastError = GetLastError();
     auto& regs = *exception->ContextRecord;
     const auto& colors = *activeProfile.load(std::memory_order_acquire);
     const ULONG_PTR theme = colors.zones;
@@ -337,7 +363,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
             callerAt(regs, 0x148) == frameBase + 0xA4638) {
             // A direct grid fill and a tree fill have different enclosing frames.
             const auto kind = callerAt(regs, 0x198) == frameBase + 0x811A08 ?
-                classifyListControl(callerAt(regs, 0x190), frameBase, frontendBase) :
+                classifyListControl(callerAt(regs, 0x190), frameBase, frontendBase, devtoolBinding.base()) :
                 listKindAt(regs, 0x268);
             regs.Rdx = listColor(kind, white, theme, colors, false, true);
         } else if ((theme & enableToolbarBand) != 0 && (regs.EFlags & 0x40) == 0 &&
@@ -452,6 +478,7 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
         return EXCEPTION_CONTINUE_SEARCH;
     }
     regs.Rip = reinterpret_cast<ULONG_PTR>(event.ExceptionAddress) + length;
+    SetLastError(lastError);
     return EXCEPTION_CONTINUE_EXECUTION;
 }
 
@@ -585,6 +612,7 @@ DWORD applyProfile(const ThemeProfile& profile, ULONG_PTR zones)
         snapshot = &*profileHistory[index];
     }
     activeProfile.store(snapshot, std::memory_order_release);
+    devtoolBinding.setEnabledLocked((zones & enableSearchResults) != 0, reinterpret_cast<HMODULE>(frameBase));
     return ERROR_SUCCESS;
 }
 

@@ -29,7 +29,7 @@ call "%CD%\build.cmd" "%OUT%\counter" counter-probe
 if errorlevel 1 goto failed
 call "%CD%\build.cmd" "%OUT%\grid" grid-probe
 if errorlevel 1 goto failed
-for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test) do (
+for %%T in (profile-test attach-test caption-test install-test counter-probe-test counter-launcher-test grid-probe-test grid-launcher-test devtool-binding-test global-search-test) do (
     cl /nologo /std:c++20 /O2 /MT /W4 /WX /EHsc /utf-8 /I. "%~dp0%%T.cpp" /Fo"%OUT%\%%T.obj" /Fe"%OUT%\%%T.exe" /link bcrypt.lib dwmapi.lib user32.lib
     if errorlevel 1 goto failed
 )
@@ -52,6 +52,10 @@ if errorlevel 1 goto failed
 "%OUT%\grid-probe-test.exe"
 if errorlevel 1 goto failed
 "%OUT%\grid-launcher-test.exe" "%OUT%\grid\grid-identity-probe.dll" "%OUT%\counter\search-counter-probe.dll" "%OUT%\normal\tree-theme.dll"
+if errorlevel 1 goto failed
+"%OUT%\devtool-binding-test.exe"
+if errorlevel 1 goto failed
+"%OUT%\global-search-test.exe"
 if errorlevel 1 goto failed
 "%OUT%\grid\grid-probe-run.exe" --attach bogus 1 --palette impossible
 if not "%errorlevel%"=="2" goto failed

@@ -558,6 +558,39 @@ def spreadsheet_view_grid_candidates(image):
                 }
 
 
+def spreadsheet_outline_dispatch_candidates(image):
+    code_rva, code = image.text()
+    data_rva, data_size, data_offset = image.sections[b".rdata"]
+    data = image.data[data_offset:data_offset + data_size]
+    slot = 0x80
+    color_load = bytes.fromhex("8B B4 24 F0 00 00 00")
+    pen_color_store = bytes.fromhex("89 74 24 6C")
+    table_stores = {}
+    for match in re.finditer(rb"\x48\x8d\x05(.{4})(?:\x48\x89[\x01\x03]|\x49\x89[\x04\x07])", code, re.DOTALL):
+        lea = code_rva + match.start()
+        table = lea + 7 + struct.unpack("<i", match[1])[0]
+        table_stores.setdefault(table, []).append(f"0x{lea:X}")
+
+    for begin, end in image.function_ranges():
+        offset = begin - code_rva
+        if offset < 0 or end - begin < 0xC6:
+            continue
+        if (code[offset + 0x35:offset + 0x3C] != color_load or
+                code[offset + 0xC2:offset + 0xC6] != pen_color_store):
+            continue
+        pointer = struct.pack("<Q", image.image_base + begin)
+        tables = []
+        for match in re.finditer(re.escape(pointer), data):
+            table = data_rva + match.start() - slot
+            if table % 8 == 0 and table in table_stores:
+                tables.append({
+                    "vtable": f"0x{table:X}",
+                    "table_loads": table_stores[table],
+                })
+        if tables:
+            yield {"handler": f"0x{begin:X}", "slot": f"0x{slot:X}", "tables": tables}
+
+
 def spreadsheet_grid_strip_candidates(image):
     rva, code = image.text()
     # The setter copies ShowGrid from view settings into this+disp32.
@@ -665,6 +698,7 @@ def compare(directory, signatures):
         result["modules"]["moxelui.dll"] = {
             "sha256": image.sha256(),
             "spreadsheet_grid_strip_candidates": list(spreadsheet_grid_strip_candidates(image)),
+            "spreadsheet_outline_dispatch_candidates": list(spreadsheet_outline_dispatch_candidates(image)),
         }
     return result
 

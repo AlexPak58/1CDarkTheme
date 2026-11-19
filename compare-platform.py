@@ -20,6 +20,7 @@ SEARCH_LABEL_CLASS_ID = uuid.UUID("4f2defd2-5243-4166-b7f2-3e7ffc5f6394").bytes_
 SEARCH_GRID_CLASS_ID = uuid.UUID("2dd8e24f-ea53-4aab-a45e-a973eb59375f").bytes_le
 CONTROL_PROPERTIES_ID = uuid.UUID("d3ac3bd1-b55a-11d4-a8bb-00c0df47968e").bytes_le
 SEARCH_RESULTS_TOOLBAR_CLASS_ID = uuid.UUID("12735fb0-15fd-11d4-9403-008048da11f9").bytes_le
+SEARCH_COUNTER_COMMAND_ID = uuid.UUID("0a5a13f4-fa45-4266-86eb-c76500d66328").bytes_le
 SEARCH_LABEL_LAYOUTS = {
     (0xC20, 0xC38): (0x218, 0x110),
     (0xC68, 0xC80): (0x238, 0x120),
@@ -103,9 +104,12 @@ class Image:
         rva, size, offset = self.sections[b".text"]
         return rva, self.data[offset:offset + size]
 
-    def function_ranges(self):
+    def runtime_functions(self):
         _, size, offset = self.sections.get(b".pdata", (0, 0, 0))
-        for begin, end, _ in struct.iter_unpack("<III", self.data[offset:offset + size - size % 12]):
+        return struct.iter_unpack("<III", self.data[offset:offset + size - size % 12])
+
+    def function_ranges(self):
+        for begin, end, _ in self.runtime_functions():
             if begin < end:
                 yield begin, end
 
@@ -1034,6 +1038,453 @@ def search_form_loaders(image):
         }
 
 
+def dock_title_style_candidates(image):
+    """Find local-frame command-bar style updates; glyph paint is still unknown."""
+    rva, code = image.text()
+    functions = dict(image.function_ranges())
+    layouts = (
+        ("8.3", 0x30, (0x8E, 0xB0, 0xC4), bytes.fromhex(
+            "40 84 FF 74 08 8B 83 A0 00 00 00 EB 06 8B 83 98 00 00 00 89 44 24 20")),
+        ("8.5", 0x15, (0x60, 0x7F, 0x90), bytes.fromhex(
+            "48 8B 01 48 8B D9 FF 90 F8 00 00 00 BA 13 00 00 00 B9 09 00 00 00 "
+            "84 C0 0F 45 D1 48 8D 4C 24 40")),
+    )
+    ro_rva, ro_size, ro_offset = image.sections.get(b".rdata", (0, 0, 0))
+    ro_data = image.data[ro_offset:ro_offset + ro_size]
+    for family, anchor, calls, pattern in layouts:
+        for match in re.finditer(re.escape(pattern), code):
+            offset = match.start() - anchor
+            begin = rva + offset
+            if offset < 0 or functions.get(begin, 0) < begin + calls[-1] + 6:
+                continue
+            if any(code[offset + call:offset + call + 6] != b"\xff\x90" + struct.pack("<I", slot)
+                   for call, slot in zip(calls, (0x80, 0xA8, 0xB0))):
+                continue
+            candidate = {
+                "layout": family, "function": f"0x{begin:X}",
+                "style_calls": {f"0x{slot:X}": f"0x{begin + call:X}"
+                                for call, slot in zip(calls, (0x80, 0xA8, 0xB0))},
+            }
+            if family == "8.3":
+                if code[offset + 0x1F:offset + 0x22] != bytes.fromhex("88 51 75"):
+                    continue
+                candidate.update({
+                    "flag_write": f"0x{begin + 0x1F:X}", "receiver_flag_offset": "0x75",
+                    "receiver_active_color_offset": "0xA0", "receiver_inactive_color_offset": "0x98",
+                })
+            else:
+                # Check the adjacent table contracts: setter at +40 dispatches
+                # to this updater at +F0, whose +F8 predicate selects the key.
+                tables = []
+                for entry in re.finditer(re.escape(struct.pack("<Q", image.image_base + begin)), ro_data):
+                    table_offset = entry.start() - 0xF0
+                    if table_offset < 0 or (ro_rva + table_offset) % 8 or entry.end() + 8 > ro_size:
+                        continue
+                    setter = struct.unpack_from("<Q", ro_data, table_offset + 0x40)[0] - image.image_base
+                    predicate = struct.unpack_from("<Q", ro_data, table_offset + 0xF8)[0] - image.image_base
+                    at = setter - rva
+                    # This leaf tail-call setter has no unwind (.pdata) entry.
+                    if (predicate not in functions or at < 0
+                            or code[at:at + 13] != bytes.fromhex("48 8B 01 88 51 40 48 FF A0 F0 00 00 00")):
+                        continue
+                    predicate_prefix = bytes.fromhex(
+                        "48 83 EC 28 80 79 40 00 74 2E 48 8B 49 28 48 85 C9 74 25 "
+                        "48 8B 01")
+                    # Saving RBX starts a second contiguous unwind fragment;
+                    # keep this prefix within the entry fragment, not past it.
+                    at = predicate - rva
+                    if (functions[predicate] < predicate + len(predicate_prefix)
+                            or code[at:at + len(predicate_prefix)] != predicate_prefix):
+                        continue
+                    tables.append({"vtable": f"0x{ro_rva + table_offset:X}",
+                                   "flag_setter": f"0x{setter:X}",
+                                   "active_predicate": f"0x{predicate:X}"})
+                if not tables:
+                    continue
+                candidate.update({"active_palette_key": 9, "inactive_palette_key": 19,
+                                  "receiver_flag_offset": "0x40", "tables": tables})
+            yield candidate
+
+
+def commandbar_pattern(window):
+    """Translate an instruction window into a regex with relocation wildcards."""
+    return b"".join(b"." if byte == "??" else re.escape(bytes.fromhex(byte)) for byte in window.split())
+
+
+def commandbar_creation(code, layout):
+    """Find the allocation, vptr stores and owner store in one instruction sequence."""
+    old = layout == "8.3"
+    if old:
+        # The earlier allocation creates another object. Its branches rejoin
+        # before the command-bar allocation, with the owner still in RSI.
+        prefix = commandbar_pattern(
+            "40 55 56 57 48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 5C 24 70 48 8B F1 "
+            "B9 80 01 00 00 FF 15 ?? ?? ?? ?? 48 8B D8 48 89 44 24 60 48 8B C8 E8 ?? ?? ?? ?? "
+            "48 8D 05 ?? ?? ?? ?? 48 89 03 48 8D 05 ?? ?? ?? ?? 48 89 83 A8 00 00 00 "
+            "48 8D 05 ?? ?? ?? ?? 48 89 83 B0 00 00 00 48 8B CB E8 ?? ?? ?? ?? 90 "
+            "48 8B 8E 58 01 00 00 33 ED 48 3B CB 74 1D 48 85 C9 74 0E "
+            "48 89 AE 58 01 00 00 48 8B 01 FF 50 10 90 48 89 9E 58 01 00 00 48 8B DD "
+            "48 85 DB 74 0A 48 8B 03 48 8B CB FF 50 10 90 "
+            "BA 05 00 00 00 48 8B 8E 58 01 00 00 FF 15 ?? ?? ?? ??")
+        allocation = rb"\xb9(?P<size>[\x78\x88]\x06\0\0)"
+        stack_slot = b"\x60"
+        zero_members = rb"\x48\x89\xab(?P<zero1>.{4})\x48\x89\xab(?P<zero2>.{4})"
+        later_vptrs = (0x98, 0x488, 0x530, 0x538, 0x5E8, 0x5F0, 0x5F8, 0x600)
+        attach = commandbar_pattern(
+            "85 C0 74 16 48 8B 03 BA 01 00 00 00 48 8B CB FF 90 40 02 00 00 48 8B DD EB 0A "
+            "48 8B 03 48 8B CB FF 50 08 90 48 8B 8E D0 00 00 00 48 3B CB 74 1D 48 85 C9 74 0E "
+            "48 89 AE D0 00 00 00 48 8B 01 FF 50 10 90") + rb"(?P<owner_store>\x48\x89\x9e\xd0\0\0\0)\x48\x8b\xdd"
+    else:
+        prefix = commandbar_pattern("40 53 56 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 8B F9")
+        allocation = rb"\xb9(?P<size>\xb0\x06\0\0)"
+        stack_slot = b"\x58"
+        zero_members = rb"\x33\xf6\x48\x89\xb3(?P<zero1>.{4})"
+        later_vptrs = (0x98, 0x488, 0x558, 0x560, 0x618, 0x620, 0x628, 0x630)
+        attach = commandbar_pattern(
+            "85 C0 74 13 48 8B 03 8D 56 01 48 8B CB FF 90 40 02 00 00 8B DE EB 0A "
+            "48 8B 03 48 8B CB FF 50 08 90 48 8B 4F 50 48 3B CB 74 17 48 85 C9 74 0B "
+            "48 89 77 50 48 8B 01 FF 50 10 90") + rb"(?P<owner_store>\x48\x89\x5f\x50)\x48\x8b\xde"
+    vptrs = []
+    for member in (0, 8, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, *later_vptrs):
+        if member == 0:
+            write = b"\x48\x89\x03"
+        elif member < 0x80:
+            write = b"\x48\x89\x43" + bytes((member,))
+        else:
+            write = b"\x48\x89\x83" + struct.pack("<I", member)
+        vptrs.append(rb"\x48\x8d\x05(?P<table_" + f"{member:X}".encode() + rb">.{4})" + re.escape(write))
+    calls = (rb"\xff\x15(?P<allocator>.{4})\x48\x8b\xd8\x48\x89\x44\x24" + re.escape(stack_slot)
+             + rb"\x48\x8b\xc8\xe8(?P<base_ctor>.{4})")
+    pattern = (prefix + allocation + calls + zero_members + b"".join(vptrs)
+               + rb"\x48\x8b\xcb\xe8(?P<init>.{4})" + attach)
+    return re.finditer(pattern, code, re.DOTALL)
+
+
+def commandbar_resolve_pattern(layout):
+    """Tie the role inputs and cached results to the pen call in one path."""
+    old = layout == "8.3"
+    save_registers = "48 89 5C 24 10" if old else "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20"
+    pattern = commandbar_pattern(save_registers + " 55 48 8B EC 48 83 EC 60 48 8B 05 ?? ?? ?? ?? "
+                                 "48 33 C4 48 89 45 F0 48 8B 01 4C 8D 81")
+    pattern += rb"(?P<color0>.{4})" + commandbar_pattern("48 8D 55 D0 C7 45 D0 00 00 00 00")
+    pattern += commandbar_pattern("48 8B D9" if old else "48 8B F1")
+    bar_register = 0x83 if old else 0x86  # [rbx+disp32] or [rsi+disp32]
+    call = bytes.fromhex("FF 90 78 01 00 00")
+    reload_receiver = bytes.fromhex("48 8D 55 D0 48 8B 03 48 8B CB" if old else "48 8D 55 D0 48 8B 06 48 8B CE")
+    for role, cache in enumerate((0x370, 0x378, 0x37C, 0x380, 0x384, 0x388)):
+        pattern += (re.escape(call + bytes((0x4C, 0x8D, bar_register)))
+                    + rb"(?P<color" + str(role + 1).encode() + rb">.{4})"
+                    + re.escape(bytes.fromhex("C7 45 D0") + struct.pack("<I", role + 1))
+                    + rb"(?P<cache" + str(role).encode() + rb">"
+                    + re.escape(bytes((0x89, bar_register)) + struct.pack("<I", cache)) + rb")"
+                    + re.escape(reload_receiver))
+    pattern += re.escape(call)
+    # The only intervening branch skips the existing resource release, then
+    # joins at the resource creation path before role 1 is read for the pen.
+    if old:
+        pattern += commandbar_pattern(
+            "48 83 BB 90 03 00 00 FF 89 83 8C 03 00 00 74 19 E8 ?? ?? ?? ?? "
+            "48 8B 93 90 03 00 00 48 8B C8 4C 8B 00 41 FF 90 30 02 00 00 E8 ?? ?? ?? ?? "
+            "4C 8B 83 F0 01 00 00 48 8D 93 FC 01 00 00 41 B9 64 00 00 00 48 8B 08 "
+            "C7 45 D8 02 00 00 00 4C 8B 91 28 02 00 00 48 8B 0D ?? ?? ?? ?? 0F 10 01 "
+            "48 8D 4D D8 C6 45 EC 01 48 89 4C 24 20 48 8B C8 0F 11 45 DC 41 FF D2")
+    else:
+        pattern += commandbar_pattern(
+            "48 83 BE 90 03 00 00 FF 89 86 8C 03 00 00 74 19 E8 ?? ?? ?? ?? "
+            "48 8B 96 90 03 00 00 48 8B C8 4C 8B 00 41 FF 90 38 02 00 00 E8 ?? ?? ?? ?? "
+            "BA 02 00 00 00 48 8B F8 48 8B 08 48 8B 99 30 02 00 00 48 8D 4D D8 FF 15 ?? ?? ?? ?? "
+            "4C 8B 86 F0 01 00 00 48 8D 45 D8 48 8D 96 FC 01 00 00 48 89 44 24 20 "
+            "41 B9 64 00 00 00 48 8B CF FF D3")
+    return re.compile(pattern + commandbar_pattern(
+        "8B 8B 78 03 00 00 48 89 83 90 03 00 00 FF 15" if old else
+        "8B 8E 78 03 00 00 48 89 86 90 03 00 00 FF 15") + rb"(?P<pen>.{4})"
+        + commandbar_pattern("8B 8B 8C 03 00 00" if old else "8B 8E 8C 03 00 00")
+        + rb"(?P<pen_store>" + commandbar_pattern("48 89 83 98 03 00 00" if old else "48 89 86 98 03 00 00")
+        + rb")", re.DOTALL)
+
+
+def commandbar_palette_candidates(image):
+    """Trace role arguments and result stores without interpreting role switch bodies."""
+    rva, code = image.text()
+    functions = {begin: (end, unwind) for begin, end, unwind in image.runtime_functions() if begin < end}
+    imports = {slot: (dll, name) for dll, name, slot in image.imports()}
+    ro_rva, ro_size, ro_offset = image.sections.get(b".rdata", (0, 0, 0))
+
+    def relative(match, group):
+        return rva + match.end(group) + struct.unpack("<i", match[group])[0]
+
+    def number(match, group):
+        return struct.unpack("<I", match[group])[0]
+
+    def entry_match(entry, pattern, chained=False):
+        end, unwind = functions.get(entry, (0, 0))
+        if chained:
+            # A delayed RBX save splits the initializer's unwind range. The
+            # contiguous fragment must explicitly chain to the entry record.
+            tail_end, tail_unwind = functions.get(end, (0, 0))
+            if not ro_rva <= tail_unwind <= ro_rva + ro_size - 4:
+                return None
+            metadata = ro_offset + tail_unwind - ro_rva
+            if image.data[metadata] != 0x21:  # Version 1, UNW_FLAG_CHAININFO.
+                return None
+            codes = image.data[metadata + 2]
+            chain = metadata + 4 + 2 * ((codes + 1) & ~1)
+            if chain + 12 > ro_offset + ro_size or image.read("III", chain) != (entry, end, unwind):
+                return None
+            end = tail_end
+        if rva <= entry < end <= rva + len(code):
+            return pattern.match(code, entry - rva, end - rva)
+        return None
+
+    def table_entry(table, slot):
+        address = table + slot
+        if table % 8 == 0 and ro_rva <= table <= address <= ro_rva + ro_size - 8:
+            return image.read("Q", ro_offset + address - ro_rva) - image.image_base
+        return 0
+
+    base_pattern = re.compile(commandbar_pattern(
+        "48 89 4C 24 08 55 56 57 48 83 EC 40 48 C7 44 24 20 FE FF FF FF "
+        "48 89 5C 24 70 48 8B F9 E8 ?? ?? ?? ?? 90 48 8D B7 88 04 00 00"), re.DOTALL)
+    init_pattern = re.compile(commandbar_pattern(
+        "40 57 48 83 EC 20 48 8B F9 E8 ?? ?? ?? ?? 85 C0 0F 88 EA 00 00 00 33 C9 "
+        "48 89 5C 24 30 48 85 FF 48 8D 47 20 48 0F 44 C1 48 89 87") + rb"(?P<field>.{4})", re.DOTALL)
+    setter_pattern = commandbar_pattern(
+        "40 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 48 48 8B FA 48 8B D9 48 81 C1")
+    setter_pattern += (rb"(?P<color>.{4})\xff\x15(?P<assign>.{4})"
+                       + rb"(?P<flag>\xc6\x83\x1c\x04\0\0\x01)?"
+                       + commandbar_pattern("48 8D 4B F0 48 8B 01 48 8D 54 24 50 FF 50 70"))
+    setter_pattern = re.compile(setter_pattern, re.DOTALL)
+    refresh_pattern = re.compile(commandbar_pattern(
+        "40 55 56 57 48 83 EC 30 48 C7 44 24 20 FE FF FF FF 48 89 5C 24 60 48 8B F1 "
+        "48 8B 41 A8 48 83 C1 A8") + rb"(?P<cleanup>\xff\x90\xc0\0\0\0)"
+        + commandbar_pattern("48 8B 46 A8 48 8D 4E A8") + rb"(?P<resolve>\xff\x90\xb8\0\0\0)")
+    for layout in ("8.3", "8.5"):
+        old = layout == "8.3"
+        family = layout.replace(".", "")
+        resolve_pattern = commandbar_resolve_pattern(layout)
+        cleanup_pattern = re.compile(commandbar_pattern(
+            ("40 53" if old else "48 89 5C 24 10 48 89 74 24 18 57") +
+            " 48 83 EC 50 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 48 48 83 B9 90 03 00 00 FF "
+            + ("48 8B D9" if old else "48 8B F1") + " 74 1E"), re.DOTALL)
+        role_pattern = re.compile(commandbar_pattern(
+            ("48 89 5C 24 10 57" if old else "48 89 5C 24 10 55 56 57") +
+            " 48 83 EC 40 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 44 24 38 48 63 02 " +
+            ("49 8B D8 48 8B F9" if old else "49 8B E8 48 8B F1") + " 83 F8 06 0F 87 ?? ?? ?? ??"), re.DOTALL)
+        for creation in commandbar_creation(code, layout):
+            creator = rva + creation.start()
+            creator_end, _ = functions.get(creator, (0, 0))
+            if not rva + creation.end() <= creator_end <= rva + len(code):
+                continue
+            size = number(creation, "size")
+            if number(creation, "zero1") != size - (16 if old else 8):
+                continue
+            if old and number(creation, "zero2") != size - 8:
+                continue
+            allocator = relative(creation, "allocator")
+            if imports.get(allocator) != (f"nuke{family}.dll", "?nuke_new@@YAPEAX_K@Z"):
+                continue
+            base_ctor = relative(creation, "base_ctor")
+            init = relative(creation, "init")
+            initializer = entry_match(init, init_pattern, chained=True)
+            if not entry_match(base_ctor, base_pattern) or not initializer:
+                continue
+            if number(initializer, "field") != size - (0x20 if old else 0x18):
+                continue
+            tables = [relative(creation, group) for group in creation.groupdict() if group.startswith("table_")]
+            if len(tables) != len(set(tables)) or not all(rva <= table_entry(table, 0) < rva + len(code) for table in tables):
+                continue
+            primary, style = relative(creation, "table_0"), relative(creation, "table_58")
+            refresh, resolve, cleanup, role_method = (table_entry(style, 0xB0), table_entry(primary, 0xB8),
+                                                      table_entry(primary, 0xC0), table_entry(primary, 0x178))
+            dispatch = entry_match(refresh, refresh_pattern)
+            resolver = entry_match(resolve, resolve_pattern)
+            if not (dispatch and resolver and entry_match(cleanup, cleanup_pattern) and entry_match(role_method, role_pattern)):
+                continue
+            pen = relative(resolver, "pen")
+            if imports.get(pen) != (f"wbase{family}.dll", "?getSolidPen@wbase@@YAPEAU_VPEN@grphcs@@K@Z"):
+                continue
+            fields = [number(resolver, f"color{role}") for role in range(7)]
+            expected_fields = (0x29C, 0x30C, 0x280, 0x2B8, 0x2D4, 0x2F0, 0x328)
+            if fields != [field + (0 if old else 4) for field in expected_fields]:
+                continue
+            setters = []
+            for slot, role in ((0x80, 0), (0xA8, 1), (0x88, 2)):
+                setter = table_entry(style, slot)
+                match = entry_match(setter, setter_pattern)
+                if not match or number(match, "color") + 0x58 != fields[role] or bool(match["flag"]) != (role == 2):
+                    break
+                if imports.get(relative(match, "assign")) != (f"core{family}.dll", "??4Color@core@@QEAAAEAU01@AEBU01@@Z"):
+                    break
+                setters.append({"slot": f"0x{slot:X}", "function": f"0x{setter:X}", "role": role,
+                                "assignment_call": f"0x{rva + match.start('assign') - 2:X}",
+                                "interface_color_offset": f"0x{number(match, 'color'):X}",
+                                "bar_color_offset": f"0x{fields[role]:X}"})
+            if len(setters) != 3:
+                continue
+            yield {
+                "evidence": "static_class_structure", "dock_title_updater_receiver_verified": False,
+                "role_switch_bodies_verified": False,
+                "layout": layout, "creator": f"0x{creator:X}", "allocation_size": f"0x{size:X}",
+                "allocation_call": f"0x{rva + creation.start('allocator') - 2:X}",
+                "base_constructor": f"0x{base_ctor:X}", "base_constructor_call": f"0x{rva + creation.start('base_ctor') - 1:X}",
+                "initializer": f"0x{init:X}", "initializer_call": f"0x{rva + creation.start('init') - 1:X}",
+                "primary_vtable": f"0x{primary:X}", "style_vtable": f"0x{style:X}", "style_offset": "0x58",
+                "primary_vtable_store": f"0x{rva + creation.end('table_0'):X}",
+                "style_vtable_store": f"0x{rva + creation.end('table_58'):X}",
+                "owner_bar_offset": "0xD0" if old else "0x50",
+                "owner_bar_store": f"0x{rva + creation.start('owner_store'):X}",
+                "style_setters": setters, "style_refresh": f"0x{refresh:X}",
+                "cleanup": f"0x{cleanup:X}", "cleanup_dispatch": f"0x{rva + dispatch.start('cleanup'):X}",
+                "resolver": f"0x{resolve:X}", "resolver_dispatch": f"0x{rva + dispatch.start('resolve'):X}",
+                "role_method": f"0x{role_method:X}",
+                "roles": [{"index": role, "bar_color_offset": f"0x{field:X}", "cache_offset": f"0x{cache:X}",
+                           "cache_store": f"0x{rva + resolver.start(f'cache{role}'):X}"}
+                          for role, (field, cache) in enumerate(zip(fields, (0x370, 0x378, 0x37C, 0x380)))],
+                "pen_color_cache_offset": "0x378", "pen_handle_offset": "0x398",
+                "pen_call": f"0x{rva + resolver.start('pen') - 2:X}",
+                "pen_handle_store": f"0x{rva + resolver.start('pen_store'):X}",
+            }
+
+
+def search_counter_candidates(image):
+    """Locate lexical command-text candidates, not a complete CFG or a safe hook."""
+    rva, code = image.text()
+    functions = sorted(image.function_ranges())
+    starts = [start for start, _ in functions]
+    imports = {slot: (dll, name) for dll, name, slot in image.imports()}
+
+    def containing(site):
+        index = bisect_right(starts, site) - 1
+        if index >= 0 and site < functions[index][1]:
+            return functions[index]
+        return None
+
+    def relative(match, group):
+        return rva + match.end(group) + struct.unpack("<i", match[group])[0]
+
+    def core_import(slot, name):
+        dll, symbol = imports.get(slot, ("", ""))
+        return dll in ("core83.dll", "core85.dll") and symbol.startswith(name + "@core@@")
+
+    def routine_prefix(target, prefix):
+        # Leaf string-copy routines can lack unwind records. The complete prefix
+        # must nevertheless lie in .text; a rel32 to an arbitrary routine fails.
+        offset = target - rva
+        return offset >= 0 and code[offset:offset + len(prefix)] == prefix
+
+    def data_sites(value):
+        for section in (b".rdata", b".data"):
+            start, size, offset = image.sections.get(section, (0, 0, 0))
+            for match in re.finditer(re.escape(value), image.data[offset:offset + size]):
+                yield start + match.start()
+
+    keys = set(data_sites(b"IDS_CMD_FOUNDLABEL\0"))
+    commands = set(data_sites(SEARCH_COUNTER_COMMAND_ID + struct.pack("<I", 1)))
+    # Load the localized label and copy it to controller+88. Both observed
+    # layouts use the same temporary for the load_wstring output and copy input.
+    loader_patterns = (
+        rb"\x4c\x8d\x05(?P<key>.{4})\x48\x8d\x15.{4}"
+        rb"\x48\x8d\x4d(?P<temp>.)\xff\x15(?P<load>.{4})"
+        rb"\x48\x8d\x8b\x88\x00\x00\x00\x48\x8d\x55(?P=temp)\xe8(?P<assign>.{4})",
+        rb"\x4c\x8d\x05(?P<key>.{4})\x48\x8d\x15.{4}"
+        rb"\x48\x8d\x4c\x24(?P<temp>.)\xff\x15(?P<load>.{4})"
+        rb"\x48\x8d\x8e\x88\x00\x00\x00\x48\x8d\x54\x24(?P=temp)\xe8(?P<assign>.{4})",
+    )
+    assignment_prefix = bytes.fromhex(
+        "48 89 5C 24 08 57 48 83 EC 20 48 8B FA 48 8B D9 48 3B CA 74 49 0F B7 41 16")
+    copy_prefix = bytes.fromhex(
+        "0F B7 42 16 4C 8B C1 A9 80 FF FF FF 74 38 48 8B 42 08 48 89 41 08")
+    loaders = []
+    for pattern in loader_patterns:
+        for match in re.finditer(pattern, code, re.DOTALL):
+            bounds = containing(rva + match.start())
+            if (relative(match, "key") in keys and bounds and rva + match.end() <= bounds[1]
+                    and core_import(relative(match, "load"), "?load_wstring")
+                    and routine_prefix(relative(match, "assign"), assignment_prefix)):
+                loaders.append({"function": f"0x{bounds[0]:X}",
+                                "resource_reference": f"0x{rva + match.start():X}",
+                                "assignment_function": f"0x{relative(match, 'assign'):X}",
+                                "resource_name_rva": f"0x{relative(match, 'key'):X}"})
+    if not loaders or not commands:
+        return
+
+    # Compare all 20 bytes of CompositeID (GUID halves and numeric command ID).
+    command_test = (
+        rb"(?:\x44\x3b\x0d|\x3b\x1d)(?P<id>.{4})\x75\x1e"
+        rb"\x49\x8b\x48\x08\x48\x33\x0d(?P<high>.{4})"
+        rb"\x49\x8b\x00\x48\x33\x05(?P<low>.{4})"
+        rb"\x48\x0b\xc8\x75\x04\xb0\x01\xeb\x02\x32\xc0\x84\xc0"
+        rb"(?:\x74(?P<short_skip>.)|\x0f\x84(?P<long_skip>.{4}))"
+    )
+    # Format decimal controller+C0 after the cached label, then publish through
+    # command UI slot+40. 8.3.25 uses a separate helper and r14 for the UI receiver.
+    format_patterns = (
+        ("rdi", rb"\x4c\x8d\xbb\x88\x00\x00\x00.{0,96}?"
+         rb"\x49\x8b\xd7\x48\x8d\x4d(?P<temp>.)\xe8(?P<copy>.{4})"
+         rb"\xba\x01\x00\x00\x00\x48\x8d\x4d(?P=temp)\xe8.{4}"
+         rb"\xb9\x20\x00\x00\x00\x66\x89\x08"
+         rb"(?:\x41\xb8\x0a\x00\x00\x00|\x44\x8d\x41\xea)"
+         rb"\x48\x8d\x55(?P=temp)\x8b\x8b\xc0\x00\x00\x00"
+         rb"\xff\x15(?P<format>.{4})\x48\x8b\x07"
+         rb"\x48\x8d\x55(?P=temp)\x48\x8b\xcf(?P<sink>\xff\x50\x40)"),
+        ("r14", rb"\x48\x8d\xae\x88\x00\x00\x00.{0,96}?"
+         rb"\x48\x8b\xd5\x48\x8d\x4c\x24(?P<temp>.)\xe8(?P<copy>.{4})"
+         rb"\xba\x01\x00\x00\x00\x48\x8d\x4c\x24(?P=temp)\xe8.{4}"
+         rb"\xb9\x20\x00\x00\x00\x66\x89\x08\x44\x8d\x41\xea"
+         rb"\x48\x8d\x54\x24(?P=temp)\x8b\x8e\xc0\x00\x00\x00"
+         rb"\xff\x15(?P<format>.{4})\x49\x8b\x06"
+         rb"\x48\x8d\x54\x24(?P=temp)\x49\x8b\xce(?P<sink>\xff\x50\x40)"),
+    )
+    for command in re.finditer(command_test, code, re.DOTALL):
+        descriptor = relative(command, "low")
+        bounds = containing(rva + command.start())
+        if (descriptor not in commands or relative(command, "high") != descriptor + 8
+                or relative(command, "id") != descriptor + 16 or not bounds):
+            continue
+        displacement = (struct.unpack("<b", command["short_skip"])[0]
+                        if command["short_skip"] is not None
+                        else struct.unpack("<i", command["long_skip"])[0])
+        branch_end = command.end() + displacement
+        if not command.end() < branch_end <= bounds[1] - rva:
+            continue
+        operation_test = re.match(
+            rb"\x8b\xca\x85\xd2\x0f\x84.{4}\x83\xe9\x01\x0f\x84.{4}\x83\xf9\x01",
+            code[command.end():branch_end], re.DOTALL)
+        if not operation_test:
+            continue
+        windows = [(command.end(), branch_end, bounds[0], None)]
+        # This complete argument setup is the observed 8.3.25 delegation.
+        for call in re.finditer(rb"\x48\x8b\xd7\x49\x8b\xcb\xe8(.{4})",
+                                code[command.end():branch_end], re.DOTALL):
+            site = command.end() + call.end() - 5
+            target = rva + site + 5 + struct.unpack("<i", call[1])[0]
+            helper = containing(target)
+            if helper and helper[0] == target:
+                windows.append((target - rva, helper[1] - rva, target, rva + site))
+        for start, end, function, helper_call in windows:
+            for receiver, pattern in format_patterns:
+                for match in re.compile(pattern, re.DOTALL).finditer(code, start, end):
+                    if (not core_import(relative(match, "format"), "?string_ito")
+                            or not routine_prefix(relative(match, "copy"), copy_prefix)):
+                        continue
+                    yield {
+                        "resource": "IDS_CMD_FOUNDLABEL",
+                        "label_initializers": loaders,
+                        "command_guid": str(uuid.UUID(bytes_le=SEARCH_COUNTER_COMMAND_ID)),
+                        "command_id": 1,
+                        "command_descriptor": f"0x{descriptor:X}",
+                        "handler": f"0x{bounds[0]:X}",
+                        "command_test": f"0x{rva + command.start():X}",
+                        "formatter_function": f"0x{function:X}",
+                        "helper_call": f"0x{helper_call:X}" if helper_call else None,
+                        "label_copy_function": f"0x{relative(match, 'copy'):X}",
+                        "label_offset": "0x88", "count_offset": "0xC0",
+                        "format_call": f"0x{rva + match.start('format') - 2:X}",
+                        "text_setter_call": f"0x{rva + match.start('sink'):X}",
+                        "text_setter_slot": "0x40", "text_setter_receiver": receiver,
+                    }
+
+
 def compare(directory, signatures):
     result = {"directory": str(directory), "clients": [], "modules": {}}
     for name in ("1cv8.exe", "1cv8c.exe"):
@@ -1049,6 +1500,8 @@ def compare(directory, signatures):
             matches = re.finditer(b"(?=" + re.escape(windows[site]) + b")", code)
             summary["exact_windows"][site] = [f"0x{rva + match.start() + 8:X}" for match in matches]
         if name == "frame.dll":
+            summary["dock_title_style_candidates"] = list(dock_title_style_candidates(image))
+            summary["commandbar_palette_candidates"] = list(commandbar_palette_candidates(image))
             summary["frame_color_candidates"] = frame_color_candidates(image, rva, code)
             summary["property_palette_candidates"] = list(property_palette_candidates(
                 image, rva, code, windows["property_paint"]))
@@ -1116,6 +1569,7 @@ def compare(directory, signatures):
         result["modules"]["frntend.dll"] = {
             "sha256": image.sha256(),
             "search_form_loaders": list(search_form_loaders(image)),
+            "search_counter_candidates": list(search_counter_candidates(image)),
         }
     return result
 

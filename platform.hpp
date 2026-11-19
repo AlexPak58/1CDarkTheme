@@ -21,8 +21,14 @@ inline constexpr ULONG_PTR enableDropdown = 256;
 inline constexpr ULONG_PTR enablePopupMenu = 512;
 inline constexpr ULONG_PTR enableToolbarBand = 1024;
 inline constexpr ULONG_PTR enableToolbarBorder = 2048;
-inline constexpr DWORD themeZoneMask = 4095;
-inline constexpr DWORD themeProfileVersion = 4;
+inline constexpr ULONG_PTR enableSearchResults = 4096;
+inline constexpr ULONG_PTR enablePanelHeaders = 8192;
+inline constexpr ULONG_PTR enableDockSplitter = 16384;
+inline constexpr ULONG_PTR enableScrollerCorner = 32768;
+inline constexpr ULONG_PTR enableScrollerPng = 65536;
+inline constexpr ULONG_PTR enableScrollerThumb = 131072;
+inline constexpr DWORD themeZoneMask = 262143;
+inline constexpr DWORD themeProfileVersion = 11;
 
 enum PaletteColor : size_t {
     treeBackground, treeText, captionBackground, captionText,
@@ -34,6 +40,12 @@ enum PaletteColor : size_t {
     dropdownBackground, dropdownText,
     popupMenuBackground, popupMenuGutter, popupMenuText, popupMenuShortcut,
     toolbarBandBackground, toolbarBorder,
+    searchResultsBackground, searchResultsText,
+    panelHeaderBackground, panelHeaderText, panelBorder, dockSplitterFill,
+    scrollerCornerBackground, scrollerCornerBorder,
+    scrollerTrackBackground, scrollerArrowBackground, scrollerArrowGlyph,
+    scrollerArrowHover, scrollerArrowPressed,
+    scrollerThumbBackground, scrollerThumbDetail, scrollerThumbHover, scrollerThumbPressed,
     paletteColorCount
 };
 
@@ -41,13 +53,18 @@ enum PaletteColor : size_t {
 struct ThemeProfile {
     DWORD size{sizeof(ThemeProfile)};
     DWORD version{themeProfileVersion};
-    DWORD zones{255 | enablePopupMenu | enableToolbarBand | enableToolbarBorder};
+    DWORD zones{255 | enablePopupMenu | enableToolbarBand | enableToolbarBorder | enableSearchResults |
+                enablePanelHeaders | enableDockSplitter | enableScrollerCorner | enableScrollerPng};
     std::array<DWORD, paletteColorCount> colors{
         0x1F2938, 0x80F2C2, 0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5,
         0x1F2938, 0xE5EBF5, 0xA7B5C7, 0xB9D4FF, 0x305A8A, 0x1F2938,
         0x1F2938, 0xE5EBF5, 0xA7B5C7, 0x1F2938, 0xE5EBF5, 0x305A8A, 0x2A374A,
         0x1F2938, 0xE5EBF5, 0x305A8A, 0x2A374A, 0xFFFFFF, 0x000000,
-        0x1F2938, 0x2A374A, 0xE5EBF5, 0x878B8F, 0x1F2938, 0x3B4A60
+        0x1F2938, 0x2A374A, 0xE5EBF5, 0x878B8F, 0x1F2938, 0x3B4A60,
+        0x1F2938, 0xE5EBF5, 0x1F2938, 0xE5EBF5, 0x3B4758, 0x3B4758,
+        0x1F2938, 0x3B4758,
+        0x1F2938, 0x2A374A, 0xE5EBF5, 0x3B4A60, 0x305A8A,
+        0x61728A, 0x263244, 0x8093AC, 0xA4BAD4
     };
 };
 
@@ -64,6 +81,10 @@ inline constexpr auto frameHash =
     L"E592556AD68F13B143FE445587191E685ADDDBAD00A9FC7276A4086945A766F9";
 inline constexpr auto graphicsHash =
     L"C2738571BF193776E5A4227FAD46F410E43595A1AEC0160BBE30A5564966344C";
+inline constexpr auto wbaseHash =
+    L"84B615CDDB9AAB7744D96197C71D9F0C4671D9EA3E13CB263C30F7F7DD2A74DE";
+inline constexpr auto cairoHash =
+    L"EBBDDBDA980F3239C69BC570A82A5D8043C88EA31DAB48B0A3347C82D8981B68";
 
 inline constexpr auto thinClientHash = L"1FC058B6D55DC401870D5AE6BBAE8093BA759467E12806380B184951B2CB4A04";
 

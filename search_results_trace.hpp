@@ -14,6 +14,15 @@ struct SearchResultsTrace {
     DWORD cachedColorCopies;
     DWORD otherGridColorCopies;
     std::array<DWORD, searchGridWhiteWriteRvas.size()> whiteWrites;
+    DWORD resultsStandaloneCreations;
+    DWORD resultsAggregatedCreations;
+    DWORD otherCreations;
+    DWORD resultsBackgrounds;
+    DWORD otherBackgrounds;
+    DWORD replacedCairoFills;
+    DWORD replacedRowFills;
+    DWORD replacedTextBackgrounds;
+    DWORD replacedTexts;
 };
 
-static_assert(sizeof(SearchResultsTrace) == (6 + searchGridWhiteWriteRvas.size()) * sizeof(DWORD));
+static_assert(sizeof(SearchResultsTrace) == (15 + searchGridWhiteWriteRvas.size()) * sizeof(DWORD));

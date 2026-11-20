@@ -5,15 +5,28 @@
   <Style x:Key="Hint" TargetType="TextBlock"><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="Margin" Value="0,6,0,10"/></Style>
  </Window.Resources>
  <DockPanel Margin="20,14">
-  <DockPanel DockPanel.Dock="Top"><Button DockPanel.Dock="Right" Content="Выйти и вернуть цвета Конфигуратора" Click="ExitApplication" VerticalAlignment="Top"/><StackPanel><TextBlock Text="Тема 1С" FontSize="27" FontWeight="SemiBold"/><TextBlock Style="{StaticResource Hint}" Text="Работает в фоне. Закрытие окна оставляет утилиту в трее."/></StackPanel></DockPanel>
+  <TextBlock DockPanel.Dock="Top" Text="Тема 1С" FontSize="27" FontWeight="SemiBold" Margin="0,0,0,12"/>
   <TextBlock DockPanel.Dock="Bottom" x:Name="Status" TextWrapping="Wrap" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite"/>
   <TabControl x:Name="MainTabs">
-   <TabItem Header="Общие настройки"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="14">
+   <TabItem x:Name="ThemeTab" Header="Тема"><ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="14">
+    <TextBlock Text="Выберите пресет" FontSize="21" FontWeight="SemiBold" Margin="0,0,0,8"/>
+    <ListBox x:Name="ThemeChoices" DisplayMemberPath="Name" MaxHeight="285"
+             AutomationProperties.Name="Пресеты темы" SelectionChanged="ThemeChoiceChanged">
+     <ListBox.ItemContainerStyle>
+      <Style TargetType="ListBoxItem"><Setter Property="Padding" Value="10,6"/></Style>
+     </ListBox.ItemContainerStyle>
+    </ListBox>
+    <DockPanel Margin="0,10,0,12">
+     <Button x:Name="ApplyThemeButton" DockPanel.Dock="Right" Content="Применить" Click="ApplyThemeChoice" MinWidth="112"/>
+     <TextBlock x:Name="CurrentTheme" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
+    </DockPanel>
+    <TextBlock x:Name="ThemeScope" Style="{StaticResource Hint}"/>
+    <Expander Header="Дополнительные настройки"><StackPanel Margin="0,8,0,0">
     <CheckBox x:Name="EnabledBox" Content="Применять тему к открытым и новым сеансам 1С" Checked="EnabledChanged" Unchecked="EnabledChanged"/>
     <CheckBox x:Name="StartupBox" Margin="0,12,0,0" Content="Запускать в трее при входе в Windows" Checked="StartupChanged" Unchecked="StartupChanged"/>
     <TextBlock Text="Файл темы по умолчанию" FontSize="18" Margin="0,20,0,8"/>
     <DockPanel><Button DockPanel.Dock="Right" Content="Применить" Click="ApplyGlobal"/><Button DockPanel.Dock="Right" Content="Обзор…" Click="BrowseGlobal"/><TextBox x:Name="GlobalPresetPath" AutomationProperties.Name="Файл темы по умолчанию"/></DockPanel>
-    <TextBlock Style="{StaticResource Hint}" Text="Используется, если нет подходящего исключения. Изменения сохранённого файла применяются к уже открытым сеансам автоматически."/>
+    <TextBlock Style="{StaticResource Hint}" Text="Файл используется, если для базы нет исключения."/>
     <TextBlock Text="Исключения для баз и платформ" FontSize="18" Margin="0,10,0,8"/>
     <DataGrid x:Name="RulesGrid" Height="152" IsReadOnly="True" AutoGenerateColumns="False" SelectionMode="Single" SelectionChanged="RuleSelected" CanUserAddRows="False">
      <DataGrid.Columns><DataGridTextColumn Header="База" Binding="{Binding BaseId}" Width="2*"/><DataGridTextColumn Header="Платформа" Binding="{Binding Platform}" Width="*"/><DataGridTextColumn Header="Режим" Binding="{Binding Mode}" Width="*"/><DataGridTextColumn Header="Файл пресета" Binding="{Binding PresetFile}" Width="2*"/></DataGrid.Columns>
@@ -26,8 +39,10 @@
     <DockPanel Margin="0,8,0,0"><Button DockPanel.Dock="Right" Content="Обзор…" Click="BrowseRule"/><TextBox x:Name="RulePresetPath" AutomationProperties.Name="Файл пресета исключения"/></DockPanel>
     <WrapPanel Margin="0,8,0,0"><Button Content="Добавить / заменить" Click="SaveRule"/><Button Content="Вернуть общие настройки" Click="RemoveRule"/><Button Content="Очистить поля" Click="ClearRule"/></WrapPanel>
     <TextBlock Style="{StaticResource Hint}" Text="Приоритет: база и платформа → база → платформа → общая тема. Режим уточняет правило. Для штатных цветов выберите файл native.json."/>
+    <Button Content="Выйти из утилиты и вернуть цвета Конфигуратора" Click="ExitApplication" HorizontalAlignment="Left"/>
+    </StackPanel></Expander>
    </StackPanel></ScrollViewer></TabItem>
-   <TabItem Header="Редактор файла пресета"><DockPanel Margin="14">
+   <TabItem Header="Редактор пресетов"><DockPanel Margin="14">
     <StackPanel DockPanel.Dock="Top">
      <DockPanel><Button DockPanel.Dock="Right" Content="Открыть…" Click="OpenPreset"/><Button DockPanel.Dock="Right" Content="Загрузить" Click="LoadPresetPath"/><TextBox x:Name="PresetPath" AutomationProperties.Name="Путь к файлу пресета"/></DockPanel>
      <DockPanel Margin="0,8,0,10"><Button DockPanel.Dock="Right" Content="Сохранить как…" Click="SavePresetAs"/><Button DockPanel.Dock="Right" Content="Сохранить файл" Click="SavePreset"/><Label Content="Название" Target="{Binding ElementName=PresetName}"/><TextBox x:Name="PresetName" MaxLength="60" AutomationProperties.Name="Название внутри файла"/></DockPanel>
@@ -39,8 +54,8 @@
     </Grid>
    </DockPanel></TabItem>
    <TabItem x:Name="SessionsTab" Header="Открытые сеансы"><DockPanel Margin="14">
-    <StackPanel DockPanel.Dock="Top"><TextBlock Style="{StaticResource Hint}" Text="Обнаруживаются Конфигуратор и Предприятие. Применение проверено для Конфигуратора 8.3.27.2130 x64. Предприятие запускается с темой отдельно, через панель запуска ниже."/><TextBlock x:Name="MonitorStatus" TextWrapping="Wrap" Margin="0,0,0,8"/></StackPanel>
-    <Expander x:Name="LaunchPanel" DockPanel.Dock="Bottom" Header="Запустить 1С с темой" Margin="0,10,0,0"><StackPanel Margin="0,8,0,0"><ComboBox x:Name="LaunchMode" SelectedIndex="0" SelectionChanged="LaunchModeChanged" AutomationProperties.Name="Режим запуска"><ComboBoxItem Content="Конфигуратор"/><ComboBoxItem Content="Предприятие — толстый клиент (предварительная версия)"/><ComboBoxItem Content="Предприятие — тонкий клиент (предварительная версия)"/></ComboBox><TextBlock Style="{StaticResource Hint}" Text="Файловая база: полный путь к каталогу; серверная: сервер\база. Для Предприятия: HTML и изображения сохраняют оформление; явные нейтральные цвета могут измениться. Тема запущенного Предприятия действует до закрытия сеанса."/><DockPanel><Button DockPanel.Dock="Right" Content="Обзор…" Click="BrowsePlatform"/><TextBox x:Name="PlatformPath" AutomationProperties.Name="Путь к 1cv8.exe"/></DockPanel><DockPanel Margin="0,8,0,0"><Button x:Name="LaunchButton" DockPanel.Dock="Right" Content="Запустить" Click="LaunchConfigurator"/><TextBox x:Name="DatabaseTarget" AutomationProperties.Name="База 1С: сервер\база или каталог"/></DockPanel></StackPanel></Expander>
+    <StackPanel DockPanel.Dock="Top"><TextBlock Style="{StaticResource Hint}" Text="Фоновое применение поддерживается для Конфигуратора и Предприятия 8.3.27.2130 x64. Запуск через эту панель необязателен."/><TextBlock x:Name="MonitorStatus" TextWrapping="Wrap" Margin="0,0,0,8"/></StackPanel>
+    <Expander x:Name="LaunchPanel" DockPanel.Dock="Bottom" Header="Запустить 1С с темой" Margin="0,10,0,0"><StackPanel Margin="0,8,0,0"><ComboBox x:Name="LaunchMode" SelectedIndex="0" SelectionChanged="LaunchModeChanged" AutomationProperties.Name="Режим запуска"><ComboBoxItem Content="Конфигуратор"/><ComboBoxItem Content="Предприятие — толстый клиент (предварительная версия)"/><ComboBoxItem Content="Предприятие — тонкий клиент (предварительная версия)"/></ComboBox><TextBlock Style="{StaticResource Hint}" Text="Файловая база: полный путь к каталогу; серверная: сервер\база. В Предприятии тема переключается в шапке окна."/><DockPanel><Button DockPanel.Dock="Right" Content="Обзор…" Click="BrowsePlatform"/><TextBox x:Name="PlatformPath" AutomationProperties.Name="Путь к 1cv8.exe"/></DockPanel><DockPanel Margin="0,8,0,0"><Button x:Name="LaunchButton" DockPanel.Dock="Right" Content="Запустить" Click="LaunchConfigurator"/><TextBox x:Name="DatabaseTarget" AutomationProperties.Name="База 1С: сервер\база или каталог"/></DockPanel></StackPanel></Expander>
     <DataGrid x:Name="ProcessesGrid" IsReadOnly="True" AutoGenerateColumns="False" CanUserAddRows="False" SelectionMode="Single">
      <DataGrid.Columns><DataGridTextColumn Header="PID" Binding="{Binding Process.Identity.ProcessId}" Width="65"/><DataGridTextColumn Header="Режим" Binding="{Binding Process.Mode}" Width="90"/><DataGridTextColumn Header="Платформа" Binding="{Binding Process.Platform}" Width="135"/><DataGridTextColumn Header="База" Binding="{Binding Process.BaseId}" Width="*"/><DataGridTextColumn Header="Файл темы" Binding="{Binding PresetPath}" Width="*"/><DataGridTextColumn Header="Состояние" Binding="{Binding Status}" Width="130"/></DataGrid.Columns>
     </DataGrid>

@@ -9,7 +9,7 @@ struct CairoApi {
     scroller_png::CairoApi surface{};
     SetPair setScale{}, setOffset{};
 };
-struct Palette { DWORD background{}, detail{}; };
+struct Palette { DWORD background{}, detail{}; bool checkbox{}; };
 
 namespace detail {
 constexpr int argb32 = 0, rgb24 = 1, maxDimension = 256, maxStride = 4096;
@@ -25,14 +25,14 @@ inline bool complete(const CairoApi& api)
         a.scale && a.offset && a.flush && a.destroy && a.markDirty && a.data &&
         a.imageCreate && api.setScale && api.setOffset;
 }
-inline bool describe(const scroller_png::CairoApi& a, void* surface, Image& image)
+inline bool describe(const scroller_png::CairoApi& a, void* surface, Image& image, bool checkbox = false)
 {
     if (a.status(surface) || a.type(surface) != 0) return false;
     image.format = a.format(surface);
     image.width = a.width(surface); image.height = a.height(surface); image.stride = a.stride(surface);
     if ((image.format != argb32 && image.format != rgb24) || image.width <= 0 || image.height <= 0 ||
-        image.width > maxDimension || image.height > maxDimension || image.stride < image.width * 4 ||
-        image.stride > maxStride || image.stride % 4) return false;
+        image.width > (checkbox ? 1500 : maxDimension) || image.height > maxDimension || image.stride < image.width * 4 ||
+        image.stride > (checkbox ? 6144 : maxStride) || image.stride % 4) return false;
     image.bytes = static_cast<size_t>(image.stride) * static_cast<size_t>(image.height);
     a.scale(surface, &image.scaleX, &image.scaleY);
     a.offset(surface, &image.offsetX, &image.offsetY);
@@ -56,7 +56,9 @@ inline bool paint(const BYTE* source, BYTE* destination, const Image& src, const
                 if (src.format == argb32 && channel > alpha) return false;
                 straight |= (alpha ? (channel * 255 + alpha / 2) / alpha : 0) << shift;
             }
-            const auto mappedRgb = scroller_png::detail::blendArrow(straight, palette.background, palette.detail);
+            const int red = (straight >> 16) & 255, green = (straight >> 8) & 255, blue = straight & 255;
+            const auto mappedRgb = palette.checkbox && green > red + 18 && green > blue + 18
+                ? 0x80F2C2UL : scroller_png::detail::blendArrow(straight, palette.background, palette.detail);
             DWORD result = src.format == argb32 ? alpha << 24 : 0;
             for (unsigned shift = 0; shift <= 16; shift += 8)
                 result |= ((((mappedRgb >> shift) & 255) * alpha + 127) / 255) << shift;
@@ -69,7 +71,7 @@ inline void* attempt(const CairoApi& api, void* source, Palette palette, void*& 
 {
     const auto& a = api.surface;
     Image src{}, dst{};
-    if (!describe(a, source, src)) return nullptr;
+    if (!describe(a, source, src, palette.checkbox)) return nullptr;
     a.flush(source);
     if (a.status(source)) return nullptr;
     const auto* pixels = a.data(source);
@@ -78,11 +80,11 @@ inline void* attempt(const CairoApi& api, void* source, Palette palette, void*& 
     // A broken factory returning the borrowed source does not transfer ownership.
     if (!destination || destination == source) return nullptr;
     owned = destination;
-    if (!describe(a, destination, dst) || dst.format != src.format || dst.width != src.width || dst.height != src.height)
+    if (!describe(a, destination, dst, palette.checkbox) || dst.format != src.format || dst.width != src.width || dst.height != src.height)
         return nullptr;
     api.setScale(destination, src.scaleX, src.scaleY);
     api.setOffset(destination, src.offsetX, src.offsetY);
-    if (!describe(a, destination, dst) || dst.format != src.format || dst.width != src.width || dst.height != src.height ||
+    if (!describe(a, destination, dst, palette.checkbox) || dst.format != src.format || dst.width != src.width || dst.height != src.height ||
         dst.scaleX != src.scaleX || dst.scaleY != src.scaleY ||
         dst.offsetX != src.offsetX || dst.offsetY != src.offsetY) return nullptr;
     a.flush(destination);

@@ -54,7 +54,7 @@ inline DesignerWindow findDesignerMainWindow(DWORD pid)
     return search.found;
 }
 
-inline bool isDesignerCommandLine(const wchar_t* commandLine)
+inline bool isOneCCommandLine(const wchar_t* commandLine, const wchar_t* mode, bool implicitThin = false)
 {
     if (!commandLine || !*commandLine) return false;
     const HMODULE shell = LoadLibraryExW(L"shell32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -64,11 +64,17 @@ inline bool isDesignerCommandLine(const wchar_t* commandLine)
         GetProcAddress(shell, "CommandLineToArgvW"));
     int count{};
     LPWSTR* arguments = parse ? parse(commandLine, &count) : nullptr;
-    const bool designer = arguments && count >= 2 && arguments[0][0] &&
-        CompareStringOrdinal(arguments[1], -1, L"DESIGNER", -1, TRUE) == CSTR_EQUAL;
+    const bool matches = arguments && count >= 1 && arguments[0][0] &&
+        ((count >= 2 && CompareStringOrdinal(arguments[1], -1, mode, -1, TRUE) == CSTR_EQUAL) ||
+         (implicitThin && (count == 1 || arguments[1][0] == L'/' || arguments[1][0] == L'-')));
     if (arguments) LocalFree(arguments);
     FreeLibrary(shell);
-    return designer;
+    return matches;
+}
+
+inline bool isDesignerCommandLine(const wchar_t* commandLine)
+{
+    return isOneCCommandLine(commandLine,L"DESIGNER");
 }
 
 inline ULONGLONG fileTimeValue(const FILETIME& time)

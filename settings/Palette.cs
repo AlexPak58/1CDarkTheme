@@ -32,7 +32,7 @@ internal static class Palette
     public const int MaxPresetName = 60;
     public const string DefaultName = "Тёмная";
     public const string GraphiteName = "Графитовая";
-    public const string PinkName = "Нежно-розовая";
+    public const string PinkName = "Ядовито-розовый";
     public const string NativeName = "Штатные цвета";
 
     // Bits and color offsets match ThemeProfile and PaletteColor in platform.hpp.
@@ -93,15 +93,14 @@ internal static class Palette
         ]),
         new(PinkName, DefaultZones,
         [
-            "#FFF4F7", "#523044", "#F8E1E9", "#3C2433", "#F9E7EE", "#3C2433",
-            "#FFF4F7", "#3C2433", "#663B4F", "#70324F", "#E9AAC5", "#F7E9EF",
-            "#F9E7EE", "#3C2433", "#663B4F", "#F9E7EE", "#3C2433", "#E9AAC5",
-            "#F6DCE7", "#F9E7EE", "#3C2433", "#E9AAC5", "#F6DCE7", "#FFFFFF", "#000000",
-            "#FFF4F7", "#F6DCE7", "#3C2433", "#663B4F", "#F9E7EE", "#B47C96",
-            "#FFF4F7", "#3C2433", "#F8E1E9", "#3C2433", "#B87999", "#D9ADBF",
-            "#F9E7EE", "#B87999",
-            "#F9E7EE", "#F6DCE7", "#523044", "#E9AAC5", "#D58DAF",
-            "#D9ADBF", "#895269", "#E9BCD1", "#F1A7CA"
+            "#FF73C5", "#330621", "#FF36AA", "#30051F", "#FF45B5", "#30051F",
+            "#FFF0F9", "#30051F", "#65133F", "#781044", "#FF68C4", "#FFD0ED",
+            "#FFA9DD", "#30051F", "#65133F", "#FF99D5", "#30051F", "#FF45B5",
+            "#FFB6E3", "#FF99D5", "#30051F", "#FF45B5", "#FFB6E3", "#FFF0F9",
+            "#30051F", "#FFD9F0", "#FFAADB", "#30051F", "#65133F", "#FF9ED8",
+            "#B61D72", "#FFE3F4", "#30051F", "#FF8ACF", "#30051F", "#BD2079",
+            "#D33B91", "#FF9ED8", "#B61D72", "#FFBFE6", "#FFE3F4", "#530831",
+            "#FF80CB", "#FF53B9", "#F477BA", "#8F1C60", "#FF98D2", "#FF67BE"
         ]),
         new(NativeName, 0, Dark)
     ];

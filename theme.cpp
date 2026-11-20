@@ -6,6 +6,11 @@
 #include "dock_splitters.hpp"
 #include "scroller_corner.hpp"
 #include "scroller_png_hook.hpp"
+#ifndef THEME_BACKGROUND_ONLY
+#include "designer_chrome.hpp"
+#include "enterprise_toggle.hpp"
+#pragma comment(lib, "gdi32.lib")
+#endif
 #ifdef THEME_THUMB_SURFACE_PROBE
 #include "thumb_surface_capture.hpp"
 #endif
@@ -232,7 +237,14 @@ DWORD listColor(ListKind kind, DWORD original, ULONG_PTR zones,
     case ListKind::MetadataTree:
         zone = enableTreeOnly; color = text ? treeText : treeBackground; break;
     case ListKind::Dropdown:
-        zone = enableDropdown; color = text ? dropdownText : dropdownBackground; break;
+        // Built-in presets leave the optional dropdown override disabled.
+        // Follow the properties palette unless a separate list palette was requested.
+        if (zones & enableDropdown) {
+            zone = enableDropdown; color = text ? dropdownText : dropdownBackground;
+        } else {
+            zone = enableTreeAndProperties; color = text ? propertyText : propertyBackground;
+        }
+        break;
     case ListKind::SearchResults:
         zone = enableSearchResults; color = text ? searchResultsText : searchResultsBackground; break;
     default: return original;
@@ -361,7 +373,8 @@ LONG CALLBACK onBreakpoint(EXCEPTION_POINTERS* exception)
     const auto& colors = *activeProfile.load(std::memory_order_acquire);
     const ULONG_PTR theme = colors.zones;
     const bool dark = (theme & enableTreeOnly) != 0;
-    const bool withLists = (theme & (enableTreeOnly | enableDropdown | enableSearchResults)) != 0;
+    const bool withLists = (theme & (enableTreeOnly | enableDropdown | enableSearchResults |
+                                     enableTreeAndProperties)) != 0;
     const bool withBars = (theme & enableTreeAndBars) != 0;
     const bool withProperties = (theme & enableTreeAndProperties) != 0;
     const bool withStatusBar = (theme & enableStatusBar) != 0;
@@ -651,6 +664,13 @@ DWORD applyProfile(const ThemeProfile& profile, ULONG_PTR zones)
     if (zones && (installationResult == ERROR_NOT_READY || installationResult == ERROR_MOD_NOT_FOUND))
         installationResult = installSites();
     if (zones && installationResult != ERROR_SUCCESS) return installationResult;
+#ifndef THEME_BACKGROUND_ONLY
+    if (zones & (enableTreeAndBars | enableTreeAndProperties | enableTreeTabs | enableScrollerPng |
+                 enableDockSplitter)) {
+        const auto chromeResult=designer_chrome::ensure(frameBase,graphicsBase,activeProfile);
+        if (chromeResult) return chromeResult;
+    }
+#endif
     if (zones & (enableScrollerPng | enableScrollerThumb)) {
         const auto pngResult = scroller_png_hook::ensure(frameBase, graphicsBase, wbaseBase, activeProfile);
         if (pngResult) return pngResult;
@@ -685,6 +705,51 @@ bool inDesigner()
 }
 
 #ifndef THEME_BACKGROUND_ONLY
+std::atomic<const ThemeProfile*> rememberedDesignerProfile{&defaultProfile};
+
+bool designerThemeEnabled()
+{
+    return activeProfile.load(std::memory_order_acquire)->zones != 0;
+}
+
+HWND designerControlWindow()
+{
+    return findDesignerMainWindow(GetCurrentProcessId()).window;
+}
+
+ThemeProfile designerControlProfile()
+{
+    return *rememberedDesignerProfile.load(std::memory_order_acquire);
+}
+
+DWORD applyDesignerProfileLocked(const ThemeProfile& profile)
+{
+    if (profile.size != sizeof(ThemeProfile) || profile.version != themeProfileVersion ||
+        profile.zones > themeZoneMask) return ERROR_INVALID_PARAMETER;
+    for (const auto color : profile.colors) {
+        if (color > rgbMask) return ERROR_INVALID_PARAMETER;
+    }
+    const auto result=applyProfile(profile,profile.zones);
+    if (!result && profile.zones)
+        rememberedDesignerProfile.store(activeProfile.load(std::memory_order_acquire),std::memory_order_release);
+    return result;
+}
+
+bool applyDesignerControlProfile(const ThemeProfile& profile)
+{
+    AcquireSRWLockExclusive(&installationLock);
+    const auto result=applyDesignerProfileLocked(profile);
+    ReleaseSRWLockExclusive(&installationLock);
+    return result==ERROR_SUCCESS;
+}
+
+void toggleDesignerTheme()
+{
+    AcquireSRWLockExclusive(&installationLock);
+    applyDesignerProfileLocked(designerThemeEnabled() ? disabledProfile : designerControlProfile());
+    ReleaseSRWLockExclusive(&installationLock);
+}
+
 bool copyThemeProfile(LPVOID setting, ThemeProfile& profile)
 {
     if (!setting) return false;
@@ -738,14 +803,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI SetThemeProfile(LPVOID setting)
 {
     if (!inDesigner()) return ERROR_NOT_SUPPORTED;
     ThemeProfile profile;
-    if (!copyThemeProfile(setting, profile) || profile.zones > themeZoneMask)
-        return ERROR_INVALID_PARAMETER;
-    for (const auto color : profile.colors) {
-        if (color > rgbMask) return ERROR_INVALID_PARAMETER;
-    }
+    if (!copyThemeProfile(setting,profile)) return ERROR_INVALID_PARAMETER;
     AcquireSRWLockExclusive(&installationLock);
-    const DWORD result = applyProfile(profile, profile.zones);
+    const DWORD result=applyDesignerProfileLocked(profile);
     ReleaseSRWLockExclusive(&installationLock);
+    if (!result && profile.zones)
+        enterprise_toggle::start(designerThemeEnabled,toggleDesignerTheme,nullptr,nullptr,nullptr,
+                                 applyDesignerControlProfile,designerControlProfile,designerControlWindow);
     return result;
 }
 #endif

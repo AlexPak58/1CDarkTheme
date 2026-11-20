@@ -472,7 +472,7 @@ DWORD readProcessCommandLine(HANDLE process, std::wstring& commandLine)
     return commandLine.find(L'\0') == std::wstring::npos ? ERROR_SUCCESS : ERROR_INVALID_DATA;
 }
 
-DWORD validateDesigner(HANDLE process, DWORD pid, std::wstring& path)
+DWORD validateDesigner(HANDLE process, DWORD pid, std::wstring& path, bool enterprise = false)
 {
     DWORD ourSession{}, theirSession{};
     if (!ProcessIdToSessionId(GetCurrentProcessId(), &ourSession) ||
@@ -487,13 +487,17 @@ DWORD validateDesigner(HANDLE process, DWORD pid, std::wstring& path)
     if (!QueryFullProcessImageNameW(process, 0, path.data(), &length)) return GetLastError();
     path.resize(length);
     const auto name = path.find_last_of(L"\\/");
-    if (name == std::wstring::npos ||
-        CompareStringOrdinal(path.c_str() + name + 1, -1, L"1cv8.exe", -1, TRUE) != CSTR_EQUAL ||
-        !matchesSha256(path, exeHash)) return ERROR_REVISION_MISMATCH;
+    if (name == std::wstring::npos) return ERROR_REVISION_MISMATCH;
+    const auto executable = path.c_str()+name+1;
+    const bool thin = enterprise && CompareStringOrdinal(executable,-1,L"1cv8c.exe",-1,TRUE) == CSTR_EQUAL;
+    const bool thick = CompareStringOrdinal(executable,-1,L"1cv8.exe",-1,TRUE) == CSTR_EQUAL;
+    if ((!thin && !thick) || !matchesSha256(path,thin ? thinClientHash : exeHash))
+        return ERROR_REVISION_MISMATCH;
     std::wstring commandLine;
     const auto error = readProcessCommandLine(process, commandLine);
     if (error) return error;
-    return isDesignerCommandLine(commandLine.c_str()) ? ERROR_SUCCESS : ERROR_NOT_SUPPORTED;
+    return isOneCCommandLine(commandLine.c_str(),enterprise ? L"ENTERPRISE" : L"DESIGNER",thin)
+        ? ERROR_SUCCESS : ERROR_NOT_SUPPORTED;
 }
 
 struct AttachModules {
@@ -652,7 +656,24 @@ int attachError(HANDLE process, ULONGLONG creation, DWORD error)
     return attachResult(AttachStatus::Error, error);
 }
 
-int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile)
+HWND enterpriseMainWindow(DWORD pid)
+{
+    struct Search { DWORD pid; HWND window; } search{pid,nullptr};
+    EnumWindows([](HWND window, LPARAM data) -> BOOL {
+        auto& search=*reinterpret_cast<Search*>(data);
+        DWORD owner{};
+        GetWindowThreadProcessId(window,&owner);
+        RECT bounds{};
+        if (owner != search.pid || !IsWindowVisible(window) || GetWindow(window,GW_OWNER) ||
+            (GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOOLWINDOW) ||
+            !GetClientRect(window,&bounds) || bounds.right<300 || bounds.bottom<180) return TRUE;
+        search.window=window;
+        return FALSE;
+    },reinterpret_cast<LPARAM>(&search));
+    return search.window;
+}
+
+int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile, bool enterprise = false)
 {
     const Handle query(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
     if (!static_cast<HANDLE>(query)) {
@@ -662,7 +683,7 @@ int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile)
     }
     if (const auto error = checkProcessLifetime(query, creation)) return attachError(query, creation, error);
     std::wstring exe;
-    if (const auto error = validateDesigner(query, pid, exe)) return attachError(query, creation, error);
+    if (const auto error = validateDesigner(query, pid, exe, enterprise)) return attachError(query, creation, error);
 
     ThemeProcessLock targetLock;
     const auto lockResult = targetLock.acquire(pid, creation);
@@ -672,13 +693,15 @@ int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile)
 
     const auto directory = std::filesystem::path(modulePath(nullptr)).parent_path();
     if (directory.empty()) return attachResult(AttachStatus::Error, ERROR_PATH_NOT_FOUND);
-    const auto dll = (directory / L"tree-theme.dll").wstring();
+    const auto moduleName=enterprise ? L"enterprise-theme.dll" : L"tree-theme.dll";
+    const auto dll = (directory / moduleName).wstring();
+    const auto mainWindow=[=] {return enterprise ? enterpriseMainWindow(pid) : findDesignerMainWindow(pid).window;};
     AttachModules modules;
-    if (const auto error = snapshotAttachModules(pid, dll, modules)) return attachError(query, creation, error);
+    if (const auto error = snapshotAttachModules(pid, dll, modules,moduleName)) return attachError(query, creation, error);
     if (const auto error = checkProcessLifetime(query, creation)) return attachError(query, creation, error);
     if (modules.competingDll) return attachResult(AttachStatus::Conflict, ERROR_ALREADY_EXISTS);
     if (!profile.zones && !modules.ownBase) return attachResult(AttachStatus::Disabled);
-    if (profile.zones && !findDesignerMainWindow(pid).window)
+    if (profile.zones && !mainWindow())
         return attachResult(AttachStatus::NotReady, ERROR_NOT_READY);
 
     // Retain read access without sharing replacement or writes through validation and injection.
@@ -687,7 +710,8 @@ int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile)
     if (static_cast<HANDLE>(imageFile) == INVALID_HANDLE_VALUE)
         return attachResult(AttachStatus::Unsupported, GetLastError());
     AttachImage image(dll);
-    if (!image.validate()) return attachResult(AttachStatus::Unsupported, ERROR_REVISION_MISMATCH);
+    if (!image.validate("SetThemeProfile",enterprise ? "EnterpriseThemeProfileAttachV11" : themeProfileAttachExport))
+        return attachResult(AttachStatus::Unsupported, ERROR_REVISION_MISMATCH);
 
     constexpr DWORD rights = PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | SYNCHRONIZE |
                              PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE;
@@ -695,16 +719,21 @@ int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile)
     if (!static_cast<HANDLE>(process)) return attachError(query, creation, GetLastError());
     if (const auto error = checkProcessLifetime(process, creation)) return attachError(process, creation, error);
     std::wstring reopenedExe;
-    if (const auto error = validateDesigner(process, pid, reopenedExe)) return attachError(process, creation, error);
+    if (const auto error = validateDesigner(process, pid, reopenedExe,enterprise)) return attachError(process, creation, error);
     if (!pathEqual(exe, reopenedExe.c_str())) return attachResult(AttachStatus::Stale, ERROR_PROCESS_ABORTED);
-    if (const auto error = snapshotAttachModules(pid, dll, modules)) return attachError(process, creation, error);
+    if (const auto error = snapshotAttachModules(pid, dll, modules,moduleName)) return attachError(process, creation, error);
     if (modules.competingDll) return attachResult(AttachStatus::Conflict, ERROR_ALREADY_EXISTS);
     if (!profile.zones && !modules.ownBase) return attachResult(AttachStatus::Disabled);
-    if (const auto error = validateAttachModules(modules, matchesSha256))
+    const auto moduleValidation=enterprise
+        ? (modules.graphics.empty() || modules.cairo.empty() ? ERROR_MOD_NOT_FOUND
+           : matchesSha256(modules.graphics,graphicsHash) && matchesSha256(modules.cairo,cairoHash)
+             ? ERROR_SUCCESS : ERROR_REVISION_MISMATCH)
+        : validateAttachModules(modules,matchesSha256);
+    if (const auto error = moduleValidation)
         return error == ERROR_REVISION_MISMATCH ? attachResult(AttachStatus::Unsupported, error) :
                                                attachError(process, creation, error);
     if (const auto error = checkProcessLifetime(process, creation)) return attachError(process, creation, error);
-    if (profile.zones && !findDesignerMainWindow(pid).window)
+    if (profile.zones && !mainWindow())
         return attachResult(AttachStatus::NotReady, ERROR_NOT_READY);
 
     if (!modules.ownBase) {
@@ -713,7 +742,7 @@ int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile)
         if (loadError == WAIT_TIMEOUT || loadError == ERROR_DLL_INIT_FAILED)
             return attachResult(AttachStatus::Ambiguous, loadError);
         if (loadError) return attachError(process, creation, loadError);
-        if (const auto error = snapshotAttachModules(pid, dll, modules))
+        if (const auto error = snapshotAttachModules(pid, dll, modules,moduleName))
             return attachResult(AttachStatus::Ambiguous, error);
         if (modules.competingDll) return attachResult(AttachStatus::Conflict, ERROR_ALREADY_EXISTS);
     }
@@ -735,12 +764,13 @@ int attachToDesigner(DWORD pid, ULONGLONG creation, const ThemeProfile& profile)
         return attachResult(AttachStatus::NotReady, ERROR_SUCCESS, result);
     if (result == ERROR_NOT_SUPPORTED || result == ERROR_REVISION_MISMATCH)
         return attachResult(AttachStatus::Unsupported, ERROR_SUCCESS, result);
+    if (enterprise && result == ERROR_ALREADY_ASSIGNED) return attachResult(AttachStatus::Applied);
     if (result) return attachResult(AttachStatus::Error, ERROR_SUCCESS, result);
     if (const auto lifetimeError = checkProcessLifetime(process, creation))
         return attachError(process, creation, lifetimeError);
-    const auto target = findDesignerMainWindow(pid);
-    if (target.window && !checkProcessLifetime(process, creation))
-        RedrawWindow(target.window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    const auto target = mainWindow();
+    if (target && !checkProcessLifetime(process, creation))
+        RedrawWindow(target, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     return attachResult(profile.zones ? AttachStatus::Applied : AttachStatus::Disabled);
 }
 
@@ -753,7 +783,7 @@ int attachCommand(int argc, wchar_t** argv)
         !parseDecimal(argv[2], pid) || !parseDecimal(argv[3], creation) ||
         !parseProfile(argv[5], profile))
         return attachResult(AttachStatus::InvalidArgument, ERROR_INVALID_PARAMETER);
-    return attachToDesigner(pid, creation, profile);
+    return attachToDesigner(pid, creation, profile, std::wstring_view(argv[1]) == L"--attach-enterprise");
 }
 #endif
 
@@ -818,7 +848,7 @@ bool benchmark(HANDLE child, DWORD pid)
 int wmain(int argc, wchar_t** argv)
 {
 #if !defined(THEME_HAS_TRACE) && !defined(THEME_BENCHMARK)
-    if (argc > 1 && std::wstring_view(argv[1]) == L"--attach") {
+    if (argc > 1 && (std::wstring_view(argv[1]) == L"--attach" || std::wstring_view(argv[1]) == L"--attach-enterprise")) {
         try {
             return attachCommand(argc, argv);
         } catch (const std::bad_alloc&) {

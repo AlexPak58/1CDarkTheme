@@ -23,7 +23,29 @@ for check in evidence['checks']:
   assert image.read('Q',image.offset(int(check['table'],16)+int(check['slot'],16)))==image.image_base+int(check['method'],16),check
 for rva,body in re.findall(r'\{0x([0-9A-F]+), \{([^}]+)\}\}',(root/'panel_headers.hpp').read_text('utf-8')):
  expected=bytes(int(x,16) for x in re.findall('0x([0-9A-F]+)',body));image=images['frame.dll'];offset=image.offset(int(rva,16));assert image.data[offset:offset+len(expected)]==expected
-paths=['theme.cpp','platform.hpp','list_identity.hpp','devtool_binding.hpp','panel_headers.hpp','dock_splitters.hpp','scroller_corner.hpp','scroller_png.hpp','scroller_png_hook.hpp','thumb_paint.hpp','tools/adapt-2130.py']
-report={'status':'PASS','assertion_groups':len(evidence['checks'])+8,'files':{name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in paths}}
+graphics=images['grphcs.dll']
+sheet=m.Image(bin/'moxelui.dll')
+chrome=(root/'designer_chrome.hpp').read_text('utf-8')
+assert sheet.sha256().upper() in chrome, 'moxelui.dll'
+imports={(library,name):slot for library,name,slot in graphics.imports()}
+chrome_calls={
+ 0x32F6: ('cairo_fill',0xC7AE8), 0x4C42: ('cairo_set_source',0xC7B08),
+ 0x13724: ('cairo_set_source',0xC7B08),
+ 0xAE795: ('cairo_fill',0xC7AE8),
+ 0x78794: ('cairo_fill',0xC7AE8),
+ 0x7900F: ('cairo_fill',0xC7AE8),
+ 0x3659: ('cairo_stroke',0xC7A90),
+ 0xAAE3A: ('cairo_fill',0xC7AE8), 0xAE4EA: ('cairo_stroke',0xC7A90),
+}
+for after,(name,slot) in chrome_calls.items():
+ assert imports['cairo.dll',name]==slot, name
+ offset=graphics.offset(after-6)
+ assert graphics.data[offset:offset+2]==b'\xff\x15', hex(after)
+ assert after+graphics.read('i',offset+2)==slot, hex(after)
+assert imports['cairo.dll','cairo_show_glyphs']==0xC7B90
+glyph_call=graphics.offset(0x78F85)
+assert graphics.data[glyph_call:glyph_call+16]==bytes.fromhex('084803CE498B45004C8BC7488BD5FFD0')
+paths=['theme.cpp','designer_chrome.hpp','platform.hpp','list_identity.hpp','devtool_binding.hpp','panel_headers.hpp','dock_splitters.hpp','scroller_corner.hpp','scroller_png.hpp','scroller_png_hook.hpp','thumb_paint.hpp','tools/adapt-2130.py']
+report={'status':'PASS','assertion_groups':len(evidence['checks'])+10+len(chrome_calls),'files':{name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in paths}}
 (evidence_dir/'final-verification.json').write_text(json.dumps(report,indent=2),'utf-8')
 print(f"Native offline verification PASS ({report['assertion_groups']} groups, 9 panel windows); experimental thumb still defaults off")

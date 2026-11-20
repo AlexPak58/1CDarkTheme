@@ -16,7 +16,7 @@ internal sealed record ThemeConfiguration(bool Enabled, string DefaultPresetFile
                                           IReadOnlyList<ThemeRule> Rules, string ConfigurationPath)
 {
     private const int SchemaVersion = 1;
-    private const string DefaultPreset = "presets/dark.json";
+    private const string DefaultPreset = "presets/pink.json";
 
     private sealed record Document(
         [property: JsonRequired] int SchemaVersion,

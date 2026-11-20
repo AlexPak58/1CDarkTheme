@@ -206,7 +206,7 @@ foreach (var version in Enumerable.Range(1, 10))
 }
 
 var baseline = ThemeConfiguration.CreateDefault(configPath);
-Check(baseline.Enabled && baseline.DefaultPresetFile == "presets/dark.json", "initial relative default");
+Check(baseline.Enabled && baseline.DefaultPresetFile == "presets/pink.json", "initial relative pink default");
 var initialHash = ThemeConfiguration.Save(configPath, baseline, "");
 var absolute = Path.Combine(run, "custom", "absolute.json");
 var configured = baseline with

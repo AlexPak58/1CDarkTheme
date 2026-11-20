@@ -1,0 +1,20 @@
+{
+  "name": "Серый сланец — редактор модулей",
+  "colors": {
+    "Background": "#242930",
+    "CurrentToken": "#394C61",
+    "CurrentSelection": "#5A3953",
+    "PairLexeme": "#304B44",
+    "SearchResult": "#58472E",
+    "AutoAssistBackground": "#2C333D",
+    "Keywords": "#F1B4D8",
+    "Numerics": "#F0CB98",
+    "Strings": "#B5D7A6",
+    "Dates": "#F0CB98",
+    "Identifiers": "#CBDCF1",
+    "Operators": "#D1CBDC",
+    "Comments": "#AABFB0",
+    "Preprocessor": "#F1B990",
+    "Others": "#D9DEE5"
+  }
+}

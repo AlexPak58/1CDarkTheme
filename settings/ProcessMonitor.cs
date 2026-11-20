@@ -31,6 +31,7 @@ internal sealed class ProcessMonitor
     private readonly bool _observeOnly;
     private readonly Func<IReadOnlyList<DetectedProcess>> _scan;
     private readonly Func<ProcessIdentity, string, Task<ApplyResult>> _apply;
+    private readonly Func<ProcessIdentity, string, Task<ApplyResult>>? _applyEnterprise;
     private readonly TimeProvider _clock;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Dictionary<ProcessIdentity, TargetState> _targets = [];
@@ -53,16 +54,19 @@ internal sealed class ProcessMonitor
     private ProcessMonitor(string configurationPath, bool observeOnly, ProcessDiscovery discovery, string helperPath,
                            int? processId)
         : this(configurationPath, observeOnly, () => discovery.Scan(processId),
-               (identity, palette) => RunHelperAsync(helperPath, identity, palette), TimeProvider.System) { }
+               (identity, palette) => RunHelperAsync(helperPath, identity, palette), TimeProvider.System,
+               (identity, palette) => RunHelperAsync(helperPath, identity, palette, enterprise: true)) { }
 
     // The polling loop and final restoration own all target state in sequence.
     internal ProcessMonitor(string configurationPath, bool observeOnly, Func<IReadOnlyList<DetectedProcess>> scan,
-                            Func<ProcessIdentity, string, Task<ApplyResult>> apply, TimeProvider clock)
+                            Func<ProcessIdentity, string, Task<ApplyResult>> apply, TimeProvider clock,
+                            Func<ProcessIdentity, string, Task<ApplyResult>>? applyEnterprise = null)
     {
         _configurationPath = configurationPath;
         _observeOnly = observeOnly;
         _scan = scan;
         _apply = apply;
+        _applyEnterprise = applyEnterprise;
         _clock = clock;
     }
 
@@ -154,7 +158,10 @@ internal sealed class ProcessMonitor
 
         if (process.DiscoveryStatus is { } discoveryStatus)
             return Row(discoveryStatus);
-        if (process.Identity.CreationFileTime == 0 || process.Mode != "Designer" || process.Platform != SupportedPlatform)
+        var enterprise = process.Mode == "Enterprise";
+        var apply = enterprise ? _applyEnterprise : _apply;
+        if (process.Identity.CreationFileTime == 0 || process.Mode is not ("Designer" or "Enterprise") ||
+            process.Platform != SupportedPlatform || apply is null)
             return Row("unsupported");
         if (!_targets.TryGetValue(process.Identity, out var state))
         {
@@ -163,6 +170,10 @@ internal sealed class ProcessMonitor
         }
         if (state.Result is { Status: "ambiguous" or "stale" or "conflict" } terminal)
             return Row(terminal.Status, terminal.Win32, terminal.Dll);
+        // Enterprise applies once per client lifetime. The in-window switch
+        // and live preset picker own subsequent changes to that client.
+        if (enterprise && state.Result is { Status: "applied" } attached)
+            return Row(attached.Status, attached.Win32, attached.Dll);
         if (config is null)
             return Row("config_error");
         if (config.Enabled && preset is null)
@@ -171,6 +182,7 @@ internal sealed class ProcessMonitor
             return Row("observed");
 
         var mask = config.Enabled ? preset!.Preset.Mask : 0;
+        if (enterprise && mask == 0) return Row("disabled");
         var profile = config.Enabled ? path + "\0" + preset!.Hash : DisabledProfile;
         var sameProfile = state.AttemptedProfile == profile;
         if (sameProfile && state.Result is { } previous &&
@@ -180,11 +192,11 @@ internal sealed class ProcessMonitor
         if (!sameProfile)
             state.Failures = 0;
         var palette = mask == 0 ? DisabledPalette : Palette.Encode(mask, preset!.Preset.Colors);
-        var result = await _apply(process.Identity, palette);
+        var result = await apply(process.Identity, palette);
         state.AttemptedProfile = profile;
         state.Result = result;
         if (result.Status is "applied" or "disabled")
-            state.OwnsActivePalette = mask != 0 && result.Status == "applied";
+            state.OwnsActivePalette = !enterprise && mask != 0 && result.Status == "applied";
         if (result.Status == "not_ready")
         {
             state.Failures = Math.Min(state.Failures + 1, 5);
@@ -249,7 +261,8 @@ internal sealed class ProcessMonitor
     private static bool IsFileError(Exception error) => error is IOException or UnauthorizedAccessException or
         JsonException or InvalidDataException or ArgumentException or NotSupportedException;
 
-    private static async Task<ApplyResult> RunHelperAsync(string helperPath, ProcessIdentity identity, string palette)
+    private static async Task<ApplyResult> RunHelperAsync(string helperPath, ProcessIdentity identity, string palette,
+                                                         bool enterprise = false)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo(helperPath)
@@ -258,7 +271,7 @@ internal sealed class ProcessMonitor
             CreateNoWindow = true,
             RedirectStandardOutput = true
         };
-        process.StartInfo.ArgumentList.Add("--attach");
+        process.StartInfo.ArgumentList.Add(enterprise ? "--attach-enterprise" : "--attach");
         process.StartInfo.ArgumentList.Add(identity.ProcessId.ToString(CultureInfo.InvariantCulture));
         process.StartInfo.ArgumentList.Add(identity.CreationFileTime.ToString(CultureInfo.InvariantCulture));
         process.StartInfo.ArgumentList.Add("--palette");

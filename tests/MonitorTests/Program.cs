@@ -60,6 +60,19 @@ const string platform = "8.3.27.2130-x64";
 var designer = new DetectedProcess(new ProcessIdentity(120, 4), "Designer", platform, null);
 var enterprise = new DetectedProcess(new ProcessIdentity(121, 5), "Enterprise", platform, null);
 var otherBuild = new DetectedProcess(new ProcessIdentity(122, 6), "Designer", "8.3.27.2325-x86", null);
+var enterpriseRequests = new List<string>();
+var enterpriseMonitor = new ProcessMonitor(configPath, false, () => [enterprise],
+    (_, _) => throw new InvalidOperationException("Designer route used for Enterprise"),
+    TimeProvider.System, (_, palette) =>
+    {
+        enterpriseRequests.Add(palette);
+        return Task.FromResult(new ApplyResult("applied"));
+    });
+await enterpriseMonitor.PollOnceAsync();
+await enterpriseMonitor.PollOnceAsync();
+await enterpriseMonitor.StopAsync(restoreOwned: true);
+Check(enterpriseRequests.SequenceEqual([Palette.Encode(dark.Mask, dark.Colors)]),
+    "Enterprise gets the configured palette once and agent exit preserves the window mode");
 var clock = new TestClock();
 IReadOnlyList<DetectedProcess> candidates = [designer, enterprise, otherBuild];
 var requests = new List<(ProcessIdentity, string)>();

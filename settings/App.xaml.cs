@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Interop;
 using Microsoft.Win32;
 using Forms = System.Windows.Forms;
 
@@ -37,11 +38,20 @@ public partial class App : Application
             var enterpriseLaunch = args.Args.Contains("--enterprise");
             var observeOnly = args.Args.Contains("--observe-only");
             int? onlyPid = null;
+            nint themeTarget = 0;
+            bool designerTarget = false;
             for (var i = 0; i < args.Args.Length; i++)
             {
                 if (args.Args[i] is "--tray" or "--observe-only" or "--enterprise") continue;
                 if (args.Args[i] == "--only-pid" && i + 1 < args.Args.Length &&
                     int.TryParse(args.Args[++i], out var pid) && pid > 0) onlyPid = pid;
+                else if (args.Args[i] is "--theme-target" or "--designer-theme-target" && i + 1 < args.Args.Length &&
+                         nint.TryParse(args.Args[i + 1], out var target) && target > 0)
+                {
+                    designerTarget = args.Args[i] == "--designer-theme-target";
+                    themeTarget = target;
+                    i++;
+                }
                 else throw new ArgumentException("Неизвестный аргумент запуска утилиты.");
             }
 
@@ -57,6 +67,7 @@ public partial class App : Application
             _configurationPath = ThemeConfiguration.DefaultPath;
             var importWarning = BootstrapFiles(_configurationPath);
             _window = new MainWindow(_configurationPath);
+            _window.EnterpriseTheme = new EnterpriseThemeWindow(new WindowInteropHelper(_window).EnsureHandle(), themeTarget, designerTarget);
             if (importWarning is not null) _window.ShowImportWarning(importWarning);
             if (observeOnly || onlyPid is not null)
                 _window.Title += observeOnly ? " — только наблюдение" : $" — проверка PID {onlyPid}";
@@ -94,7 +105,8 @@ public partial class App : Application
         var directory = Path.GetDirectoryName(configPath)!;
         var presets = Path.Combine(directory, "presets");
         Directory.CreateDirectory(presets);
-        foreach (var name in new[] { "dark.json", "graphite.json", "pink.json", "native.json" })
+        foreach (var name in new[] { "dark.json", "graphite.json", "pink.json", "native.json",
+                                    "soft-blue.json", "slate-gray.json", "lighter-fields.json" })
         {
             var destination = Path.Combine(presets, name);
             if (!File.Exists(destination))
@@ -110,9 +122,16 @@ public partial class App : Application
     {
         if (_window is null || IsExiting) return;
         _window.RefreshConfiguration();
+        _window.SelectTheme();
         _window.Show();
         if (_window.WindowState == WindowState.Minimized) _window.WindowState = WindowState.Normal;
-        _window.Activate();
+        if (!_window.Activate() && !_window.Topmost)
+        {
+            // An existing tray process can receive an external show request
+            // without owning the current foreground window.
+            _window.Topmost = true;
+            _window.Topmost = false;
+        }
     }
 
     private void ToggleEnabled()

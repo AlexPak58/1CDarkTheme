@@ -21,6 +21,7 @@ public partial class MainWindow : Window
 {
     private readonly record struct ColorValue(string? Normalized, string Input);
     private sealed record WindowOwner(IntPtr Handle) : Forms.IWin32Window;
+    private sealed record ThemeChoice(string Name, string Path, Preset Preset);
     private readonly ColorValue[] _colors = new ColorValue[Palette.ColorCount];
     private readonly Dictionary<int, CheckBox> _checks = [];
     private readonly Dictionary<int, TextBox> _visibleInputs = [];
@@ -31,6 +32,7 @@ public partial class MainWindow : Window
     private bool _applying = true;
     private bool _dirty;
     private bool _globalDraft;
+    internal EnterpriseThemeWindow? EnterpriseTheme { get; set; }
 
     public MainWindow() : this(ThemeConfiguration.DefaultPath) { }
 
@@ -65,7 +67,12 @@ public partial class MainWindow : Window
         _applying = false;
         Closing += (_, args) =>
         {
-            if (Application.Current is App { IsExiting: false }) { args.Cancel = true; Hide(); }
+            if (Application.Current is App { IsExiting: false })
+            {
+                args.Cancel = true;
+                EnterpriseTheme?.ClearTarget();
+                Hide();
+            }
         };
     }
 
@@ -87,6 +94,7 @@ public partial class MainWindow : Window
             var config = ThemeConfiguration.Load(_configurationPath).Configuration;
             EnabledBox.IsChecked = config.Enabled;
             if (!_globalDraft) GlobalPresetPath.Text = config.DefaultPresetFile;
+            RefreshThemeChoices(config.DefaultPresetFile);
             RulesGrid.ItemsSource = config.Rules;
             StartupBox.IsChecked = App.StartupEnabled;
         }
@@ -94,9 +102,79 @@ public partial class MainWindow : Window
         finally { _applying = prior; }
     }
 
+    internal void SelectTheme() => MainTabs.SelectedItem = ThemeTab;
+
+    private void RefreshThemeChoices(string defaultFile)
+    {
+        var currentPath = ResolveFile(defaultFile);
+        var selectedPath = (ThemeChoices.SelectedItem as ThemeChoice)?.Path ?? currentPath;
+        if (!_globalDraft) selectedPath = currentPath;
+        var directory = Path.Combine(Path.GetDirectoryName(_configurationPath)!, "presets");
+        IEnumerable<string> files = Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "*.json") : [];
+        var choices = new List<ThemeChoice>();
+        foreach (var file in files.Append(currentPath).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var preset = PresetFile.Load(file).Preset;
+                choices.Add(new ThemeChoice(preset.Name,file,preset));
+            }
+            catch (Exception error) when (IsFileError(error)) { }
+        }
+        ThemeChoices.ItemsSource = choices.OrderBy(choice => choice.Name, StringComparer.CurrentCultureIgnoreCase).ToArray();
+        if (EnterpriseTheme is { IsDesignerTarget: true } target)
+        {
+            var profile = target.WindowPreset;
+            var applied = profile is null ? null : choices.Find(choice => choice.Preset.Mask == profile.Mask &&
+                (profile.Mask == 0 || choice.Preset.Colors.SequenceEqual(profile.Colors,StringComparer.OrdinalIgnoreCase)));
+            ThemeChoices.SelectedItem = applied;
+            CurrentTheme.Text = applied is null ? "Конфигуратор" : "Текущая тема — " + applied.Name;
+            ThemeScope.Text = "Пресет применяется к текущему окну Конфигуратора.";
+        }
+        else
+        {
+            ThemeChoices.SelectedItem = choices.Find(choice => string.Equals(choice.Path,selectedPath,StringComparison.OrdinalIgnoreCase));
+            var current = choices.Find(choice => string.Equals(choice.Path,currentPath,StringComparison.OrdinalIgnoreCase));
+            CurrentTheme.Text = "Текущая тема — " + (current?.Name ?? Path.GetFileName(currentPath));
+            ThemeScope.Text = "В окне Предприятия выбор сразу применяется к этому окну.";
+        }
+        ApplyThemeButton.IsEnabled = ThemeChoices.SelectedItem is ThemeChoice;
+    }
+
+    private void ThemeChoiceChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (_applying) return;
+        ApplyThemeButton.IsEnabled = ThemeChoices.SelectedItem is ThemeChoice;
+        if (EnterpriseTheme?.IsDesignerTarget != true && ThemeChoices.SelectedItem is ThemeChoice choice)
+            GlobalPresetPath.Text = StorePath(choice.Path);
+    }
+
+    private void ApplyThemeChoice(object sender, RoutedEventArgs args)
+    {
+        if (ThemeChoices.SelectedItem is ThemeChoice choice)
+        {
+            if (EnterpriseTheme is { IsDesignerTarget: true } target)
+            {
+                Guard(() =>
+                {
+                    var preset = PresetFile.Load(choice.Path).Preset;
+                    if (target.Apply(preset) == true)
+                    {
+                        CurrentTheme.Text = "Текущая тема — " + preset.Name;
+                        ShowStatus("Пресет применён к текущему окну Конфигуратора.");
+                    }
+                    else ShowStatus("Окно Конфигуратора не подтвердило применение пресета.");
+                });
+                return;
+            }
+            GlobalPresetPath.Text = StorePath(choice.Path);
+            ApplyGlobal(sender,args);
+        }
+    }
+
     internal void SetMonitorSnapshot(MonitorSnapshot snapshot)
     {
-        ProcessesGrid.ItemsSource = snapshot.Processes.Select(item => item with { Status = item.Process.Mode == "Enterprise" && item.Status == "unsupported" ? "Ручное применение через панель запуска" : StatusLabel(item.Status) }).ToArray();
+        ProcessesGrid.ItemsSource = snapshot.Processes.Select(item => item with { Status = StatusLabel(item.Status) }).ToArray();
         MonitorStatus.Text = snapshot.ConfigurationError ?? $"Найдено сеансов: {snapshot.Processes.Count}. " +
             (snapshot.Enabled == true ? "Фоновое применение включено." : "Фоновое применение выключено.");
     }
@@ -143,10 +221,16 @@ public partial class MainWindow : Window
     private void ApplyGlobal(object sender, RoutedEventArgs args) => Guard(() =>
     {
         var path = ResolveFile(GlobalPresetPath.Text);
-        _ = PresetFile.Load(path);
+        var preset = PresetFile.Load(path).Preset;
         ChangeConfiguration(config => config with { DefaultPresetFile = StorePath(path) });
         _globalDraft = false;
         RefreshConfiguration();
+        ShowStatus(EnterpriseTheme?.Apply(preset) switch
+        {
+            true => "Пресет применён к окну 1С и сохранён.",
+            false => "Пресет сохранён. Открытое окно 1С не подтвердило применение.",
+            null => "Пресет сохранён для следующих запусков."
+        });
     });
     private static string? Optional(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static bool SameRule(ThemeRule a, ThemeRule b) =>
